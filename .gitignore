@@ -1,0 +1,14 @@
+node_modules
+# Keep environment variables out of version control
+.env
+
+dist/
+coverage/
+uploads/
+
+# Variables de entorno (¡nunca al repo!)
+.env
+.env.*
+
+# Prisma generado (si aplica)
+src/generated/prisma

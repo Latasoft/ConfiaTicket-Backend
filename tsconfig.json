@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+
+    "module": "commonjs",
+    "target": "ES2020",
+    "lib": ["ES2020"],
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+
+    "types": ["node", "express"],
+    "typeRoots": ["./src/types", "./node_modules/@types"],
+
+    "forceConsistentCasingInFileNames": true,
+    "sourceMap": true,
+    "declaration": true,
+    "declarationMap": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": false,
+    "skipLibCheck": true
+  },
+  "include": ["src", "src/types"],
+  "exclude": ["node_modules", "dist"]
+}
+
+
+
+

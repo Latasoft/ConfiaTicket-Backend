@@ -1,0 +1,346 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           Int       @id @default(autoincrement())
+  name         String    @db.VarChar(100)
+  email        String    @unique @db.VarChar(254)
+  password     String    @db.VarChar(100)
+  role         String    @db.VarChar(16)
+  rut          String?   @unique @db.VarChar(16)
+  canSell      Boolean   @default(true)
+  isVerified   Boolean   @default(false)
+  isActive     Boolean   @default(true)
+  deletedAt    DateTime?
+  anonymizedAt DateTime?
+  documentUrl  String?   @db.VarChar(1024)
+  resetPasswordToken   String?   @db.VarChar(255)
+  resetPasswordExpires DateTime?
+  tokenVersion Int       @default(0)
+  failedLoginCount Int      @default(0)
+  lockUntil        DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt @default(now())
+
+  events        Event[]       @relation("OrganizerEvents")
+  reservations  Reservation[] @relation("ReservationBuyer")
+
+  application   OrganizerApplication?
+
+  // Reventa
+  resaleListings      ResaleListing[]
+  resaleOrdersBought  ResaleOrder[]   @relation("ResaleOrderBuyer")
+  ticketAssets        TicketAsset[]   @relation("TicketAssetUploader")
+
+  // Aprobaciones de tickets como superadmin (lado inverso)
+  reservationsApproved  Reservation[] @relation("ReservationApprovedBy")
+
+  @@index([role, isVerified])
+  @@index([isActive])
+  @@index([deletedAt])
+  @@index([lockUntil])
+  @@index([failedLoginCount])
+}
+
+model Event {
+  id            Int       @id @default(autoincrement())
+  title         String    @db.VarChar(120)
+  description   String    @db.VarChar(4000)
+  date          DateTime
+  location      String    @db.VarChar(120)
+  capacity      Int
+  price         Int       @default(0)
+  approved      Boolean   @default(false)
+  coverImageUrl String?   @db.VarChar(1024)
+
+  organizer     User      @relation("OrganizerEvents", fields: [organizerId], references: [id])
+  organizerId   Int
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt @default(now())
+
+  reservations  Reservation[]
+
+  payoutBankName      String? @db.VarChar(80)
+  payoutAccountType   String? @db.VarChar(16)
+  payoutAccountNumber String? @db.VarChar(30)
+  payoutHolderName    String? @db.VarChar(100)
+  payoutHolderRut     String? @db.VarChar(16)
+
+  // Reventa
+  resaleListings ResaleListing[]
+
+  @@index([organizerId])
+  @@index([approved])
+  @@index([date])
+}
+
+enum ReservationStatus {
+  PENDING_PAYMENT
+  PAID
+  CANCELED
+  EXPIRED
+}
+
+/* ====== Cadena de custodia de ticket (escrow de entrega) ====== */
+enum FulfillmentStatus {
+  WAITING_TICKET
+  TICKET_UPLOADED
+  TICKET_APPROVED
+  TICKET_REJECTED
+  DELIVERED
+}
+
+/* ====== NUEVO: estado de reembolso para reservas vencidas ====== */
+enum RefundStatus {
+  NONE
+  REQUESTED
+  SUCCEEDED
+  FAILED
+}
+
+model Reservation {
+  id        Int               @id @default(autoincrement())
+  event     Event             @relation(fields: [eventId], references: [id])
+  eventId   Int
+  buyer     User              @relation("ReservationBuyer", fields: [buyerId], references: [id])
+  buyerId   Int
+  quantity  Int
+
+  // Hold + pago
+  status    ReservationStatus @default(PENDING_PAYMENT)
+  code      String            @db.VarChar(36) @unique @default(uuid())
+  amount    Int               @default(0)
+  expiresAt DateTime?
+  paidAt    DateTime?
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt @default(now())
+
+  // 1–1 con Payment (Payment.reservationId es el FK)
+  payment   Payment?
+
+  // ==== Flujo de ticket ====
+  fulfillmentStatus  FulfillmentStatus @default(WAITING_TICKET)
+  ticketFilePath     String?           @db.VarChar(1024)
+  ticketFileName     String?           @db.VarChar(255)
+  ticketMime         String?           @db.VarChar(127)
+  ticketChecksum     String?           @db.VarChar(64)
+  ticketUploadedAt   DateTime?
+  approvedAt         DateTime?
+  rejectionReason    String?
+  deliveredAt        DateTime?
+
+  approvedByAdminId  Int?
+  approvedByAdmin    User?             @relation("ReservationApprovedBy", fields: [approvedByAdminId], references: [id])
+
+  // ==== NUEVO: plazo para subir ticket + tracking de reembolso por vencimiento ====
+  ticketUploadDeadlineAt DateTime?
+  refundStatus           RefundStatus   @default(NONE)
+  refundedAt             DateTime?
+  refundId               String?        @db.VarChar(100)
+  refundReason           String?        @db.VarChar(255)
+
+  @@index([eventId])
+  @@index([buyerId])
+  @@index([eventId, status, expiresAt])
+  @@index([fulfillmentStatus])
+  @@index([approvedByAdminId])
+  @@index([status, ticketUploadDeadlineAt])  // útil para el barrido
+  @@index([refundStatus])
+}
+
+enum ApplicationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model OrganizerApplication {
+  id           Int               @id @default(autoincrement())
+  userId       Int               @unique
+  legalName    String            @db.VarChar(150)
+  taxId        String            @db.VarChar(32)
+  phone        String?           @db.VarChar(30)
+  notes        String?           @db.Text
+  idCardImage  String            @db.VarChar(1024)
+  status       ApplicationStatus @default(PENDING)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+}
+
+// ====== Pagos Webpay / Transbank ======
+
+enum PaymentStatus {
+  INITIATED
+  COMMITTED
+  FAILED
+  ABORTED
+  TIMEOUT
+  REFUNDED
+}
+
+model Payment {
+  id             Int            @id @default(autoincrement())
+
+  // 1–1 con Reservation (opcional para reventa)
+  reservation    Reservation?   @relation(fields: [reservationId], references: [id])
+  reservationId  Int?           @unique
+
+  // 1–1 con ResaleOrder (opcional)
+  resaleOrder    ResaleOrder?   @relation("ResalePayment")
+
+  // Datos principales
+  token          String?        @unique @db.VarChar(128)
+  buyOrder       String         @unique @db.VarChar(100)
+  sessionId      String         @db.VarChar(100)
+  amount         Int
+  status         PaymentStatus  @default(INITIATED)
+
+  // Metadatos TBK
+  authorizationCode String?     @db.VarChar(20)
+  paymentTypeCode   String?     @db.VarChar(10)
+  installmentsNumber Int?
+  responseCode      Int?
+  accountingDate    String?     @db.VarChar(8) // "MMDD"
+  transactionDate   DateTime?
+  cardLast4         String?     @db.VarChar(4)
+  vci               String?     @db.VarChar(32)
+
+  // Auditoría
+  commerceCode    String?       @db.VarChar(20)
+  environment     String?       @db.VarChar(16)
+
+  // Reembolsos
+  refundedAmount  Int?
+  lastRefundAt    DateTime?
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt @default(now())
+
+  @@index([status])
+  @@index([token])
+  @@index([buyOrder])
+}
+
+/* ====== Reventa (escrow) ====== */
+
+enum ResaleListingStatus {
+  ACTIVE
+  PAUSED
+  SOLD
+  CANCELED
+  EXPIRED
+}
+
+enum ResaleOrderStatus {
+  AWAITING_PAYMENT
+  AWAITING_TICKET
+  UNDER_REVIEW
+  DELIVERED
+  AWAITING_CONFIRMATION
+  RELEASED
+  REFUND_REQUESTED
+  REFUNDED
+  CANCELED
+  EXPIRED
+}
+
+model ResaleListing {
+  id        Int                  @id @default(autoincrement())
+  eventId   Int
+  sellerId  Int
+  askPrice  Int
+  currency  String               @default("CLP")
+  status    ResaleListingStatus  @default(ACTIVE)
+  expiresAt DateTime?
+  createdAt DateTime             @default(now())
+  updatedAt DateTime             @updatedAt
+
+  event     Event                @relation(fields: [eventId], references: [id])
+  seller    User                 @relation(fields: [sellerId], references: [id])
+  orders    ResaleOrder[]
+
+  @@index([eventId])
+  @@index([sellerId])
+  @@index([status])
+}
+
+model ResaleOrder {
+  id                    Int                 @id @default(autoincrement())
+  listingId             Int
+  buyerId               Int
+  status                ResaleOrderStatus   @default(AWAITING_PAYMENT)
+  amount                Int
+  currency              String              @default("CLP")
+  paymentId             Int?                @unique
+  deliveredAt           DateTime?
+  releasedAt            DateTime?
+  canceledAt            DateTime?
+  expiresUploadAt       DateTime?
+  buyerConfirmDeadline  DateTime?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  listing               ResaleListing       @relation(fields: [listingId], references: [id])
+  buyer                 User                @relation("ResaleOrderBuyer", fields: [buyerId], references: [id])
+  payment               Payment?            @relation("ResalePayment", fields: [paymentId], references: [id])
+  assets                TicketAsset[]
+  timeline              EscrowTimeline[]
+
+  @@index([listingId])
+  @@index([buyerId])
+  @@index([status])
+}
+
+model TicketAsset {
+  id           Int         @id @default(autoincrement())
+  orderId      Int
+  uploaderId   Int
+  path         String
+  sha256       String
+  filename     String
+  contentType  String
+  size         Int
+  parsedCode   String?
+  status       String       @default("RECEIVED") // RECEIVED | APPROVED | REJECTED
+  createdAt    DateTime     @default(now())
+
+  order        ResaleOrder  @relation(fields: [orderId], references: [id])
+  uploader     User         @relation("TicketAssetUploader", fields: [uploaderId], references: [id])
+
+  @@unique([sha256])
+  @@index([orderId])
+  @@index([uploaderId])
+}
+
+model EscrowTimeline {
+  id        Int          @id @default(autoincrement())
+  orderId   Int
+  type      String       // ORDER_CREATED, PAYMENT_APPROVED, TICKET_UPLOADED, etc.
+  message   String
+  meta      Json?
+  createdAt DateTime     @default(now())
+
+  order     ResaleOrder  @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+}
+
+
+
+
+
+
+
+
