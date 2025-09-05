@@ -1,4 +1,3 @@
-// src/controllers/admin.users.controller.ts
 import { Request, Response } from "express";
 import prisma from "../prisma/client";
 
@@ -10,22 +9,7 @@ function toStr(v: unknown) {
   return String(v ?? "").trim();
 }
 
-/**
- * Devuelve el estado de la última solicitud de organizador para un usuario.
- * Si no existe, retorna null.
- */
-async function getLatestOrganizerAppStatus(userId: number) {
-  const last = await prisma.organizerApplication.findFirst({
-    where: { userId },
-    orderBy: { createdAt: "desc" },
-    select: { status: true }, // "PENDING" | "APPROVED" | "REJECTED"
-  });
-  return last?.status ?? null;
-}
-
-/**
- * Versión batch para varios usuarios (optimiza /list).
- */
+/** Batch de estados de solicitud (optimiza /list) */
 async function getLatestOrganizerAppStatuses(userIds: number[]) {
   if (userIds.length === 0) return new Map<number, string | null>();
   const rows = await prisma.organizerApplication.findMany({
@@ -33,7 +17,6 @@ async function getLatestOrganizerAppStatuses(userIds: number[]) {
     orderBy: { createdAt: "desc" },
     select: { userId: true, status: true },
   });
-  // Nos quedamos con la primera aparición por userId (ya vienen ordenadas desc por createdAt)
   const seen = new Set<number>();
   const map = new Map<number, string | null>();
   for (const r of rows) {
@@ -41,20 +24,23 @@ async function getLatestOrganizerAppStatuses(userIds: number[]) {
     seen.add(r.userId);
     map.set(r.userId, r.status);
   }
-  // Asegurar keys faltantes
-  for (const id of userIds) {
-    if (!map.has(id)) map.set(id, null);
-  }
+  for (const id of userIds) if (!map.has(id)) map.set(id, null);
   return map;
 }
 
+/**
+ * Lista de usuarios con:
+ * - latestOrganizerAppStatus (para la columna Solicitud)
+ * - effectiveCanSell: organizer && canSell && isActive && !deletedAt
+ *
+ * Ya NO hay “verified” aquí.
+ */
 export async function adminListUsers(req: Request, res: Response) {
   const page = toInt(req.query.page, 1);
   const pageSize = Math.min(50, Math.max(5, toInt(req.query.pageSize, 10)));
   const q = toStr(req.query.q);
   const role = toStr(req.query.role);
-  const verified = toStr(req.query.verified); // "true" | "false" | ""
-  const canSell = toStr(req.query.canSell);   // "true" | "false" | ""
+  const canSellQ = toStr(req.query.canSell); // "true" | "false" | ""
 
   const where: any = {
     ...(q
@@ -66,184 +52,138 @@ export async function adminListUsers(req: Request, res: Response) {
         }
       : {}),
     ...(role ? { role } : {}),
-    ...(verified ? { isVerified: verified === "true" } : {}),
-    ...(canSell ? { canSell: canSell === "true" } : {}),
   };
 
-  const [items, total] = await Promise.all([
+  const needEffCanSell = canSellQ === "true" || canSellQ === "false";
+
+  const [itemsRaw, totalRaw] = await Promise.all([
     prisma.user.findMany({
       where,
       orderBy: { id: "asc" },
-      skip: (page - 1) * pageSize,
-      take: pageSize,
+      ...(needEffCanSell ? {} : { skip: (page - 1) * pageSize, take: pageSize }),
       select: {
         id: true,
         name: true,
         email: true,
         role: true,
-        isVerified: true,
         canSell: true,
         isActive: true,
         deletedAt: true,
-        createdAt: true, // 👈 ya venía
+        createdAt: true,
         updatedAt: true,
       },
     }),
-    prisma.user.count({ where }),
+    needEffCanSell ? Promise.resolve(0) : prisma.user.count({ where }),
   ]);
 
-  const ids = items.map(u => u.id);
-  const latestMap = await getLatestOrganizerAppStatuses(ids);
+  const ids = itemsRaw.map((u) => u.id);
+  const lastStatusMap = await getLatestOrganizerAppStatuses(ids);
 
-  const itemsWithApp = items.map((u) => ({
-    ...u,
-    latestOrganizerAppStatus: latestMap.get(u.id) ?? null,
-  }));
+  const withComputed = itemsRaw.map((u) => {
+    const status = lastStatusMap.get(u.id) ?? null;
+    const effectiveCanSell =
+      u.role === "organizer" && !!u.canSell && !!u.isActive && !u.deletedAt;
 
-  res.json({ items: itemsWithApp, total, page, pageSize });
-}
+    return {
+      ...u,
+      latestOrganizerAppStatus: status as "PENDING" | "APPROVED" | "REJECTED" | null,
+      effectiveCanSell,
+    };
+  });
 
-export async function adminSetUserVerified(req: Request, res: Response) {
-  const id = Number(req.params.id);
-  const { isVerified } = req.body as { isVerified: boolean };
-
-  // Impedir verificar si no hay solicitud aprobada
-  if (isVerified === true) {
-    const status = await getLatestOrganizerAppStatus(id);
-    if (status !== "APPROVED") {
-      return res
-        .status(409)
-        .json({ error: "No puedes verificar al usuario: su solicitud de organizador no está aprobada." });
-    }
+  if (needEffCanSell) {
+    const want = canSellQ === "true";
+    const filtered = withComputed.filter((u) => u.effectiveCanSell === want);
+    const total = filtered.length;
+    const start = (page - 1) * pageSize;
+    const items = filtered.slice(start, start + pageSize);
+    return res.json({ items, total, page, pageSize });
   }
 
-  try {
-    const updated = await prisma.user.update({
-      where: { id },
-      data: { isVerified: Boolean(isVerified) },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        isVerified: true,
-        canSell: true,
-        isActive: true,
-        deletedAt: true,
-        createdAt: true, // 👈 añadido
-        updatedAt: true,
-      },
-    });
-
-    const latestMap = await getLatestOrganizerAppStatuses([id]);
-    res.json({ ...updated, latestOrganizerAppStatus: latestMap.get(id) ?? null });
-  } catch {
-    res.status(404).json({ error: "Usuario no encontrado" });
-  }
+  return res.json({
+    items: withComputed,
+    total: totalRaw,
+    page,
+    pageSize,
+  });
 }
+
+/* ========== Acciones principales que sí usamos ========== */
 
 export async function adminSetUserCanSell(req: Request, res: Response) {
   const id = Number(req.params.id);
   const { canSell } = req.body as { canSell: boolean };
 
-  // Impedir habilitar venta si no hay solicitud aprobada
-  if (canSell === true) {
-    const status = await getLatestOrganizerAppStatus(id);
-    if (status !== "APPROVED") {
-      return res
-        .status(409)
-        .json({ error: "No puedes habilitar venta: la solicitud de organizador no está aprobada." });
-    }
+  const user = await prisma.user.findUnique({
+    where: { id },
+    select: { role: true, deletedAt: true, isActive: true },
+  });
+  if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+  if (user.role !== "organizer") {
+    return res.status(409).json({ error: "Solo usuarios con rol organizer pueden vender." });
+  }
+  if (user.deletedAt || !user.isActive) {
+    return res.status(409).json({ error: "No puedes habilitar venta en cuentas inactivas o eliminadas." });
   }
 
-  try {
-    const updated = await prisma.user.update({
-      where: { id },
-      data: { canSell: Boolean(canSell) },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        isVerified: true,
-        canSell: true,
-        isActive: true,
-        deletedAt: true,
-        createdAt: true, // 👈 añadido
-        updatedAt: true,
-      },
-    });
+  const updated = await prisma.user.update({
+    where: { id },
+    data: { canSell: Boolean(canSell) },
+    select: {
+      id: true, name: true, email: true, role: true,
+      canSell: true, isActive: true, deletedAt: true,
+      createdAt: true, updatedAt: true,
+    },
+  });
 
-    const latestMap = await getLatestOrganizerAppStatuses([id]);
-    res.json({ ...updated, latestOrganizerAppStatus: latestMap.get(id) ?? null });
-  } catch {
-    res.status(404).json({ error: "Usuario no encontrado" });
-  }
+  const lastStatusMap = await getLatestOrganizerAppStatuses([id]);
+  const latestOrganizerAppStatus = lastStatusMap.get(id) ?? null;
+  const effectiveCanSell =
+    updated.role === "organizer" && !!updated.canSell && !!updated.isActive && !updated.deletedAt;
+
+  res.json({ ...updated, latestOrganizerAppStatus, effectiveCanSell });
 }
 
-/* ===========================
- *  NUEVAS ACCIONES ADMIN
- * ===========================*/
-
-/**
- * Desactivar cuenta (no borra): isActive=false, y por seguridad apaga venta/verificación.
- */
 export async function adminDeactivateUser(req: Request, res: Response) {
   const id = Number(req.params.id);
-  const auth = (req as any).user as { id: number; role: string } | undefined;
+  const updated = await prisma.user.update({
+    where: { id },
+    data: { isActive: false, canSell: false },
+    select: {
+      id: true, name: true, email: true, role: true,
+      canSell: true, isActive: true, deletedAt: true,
+      createdAt: true, updatedAt: true,
+    },
+  });
 
-  // Opcional: evita auto-desactivarse si eres el único superadmin, etc.
-  if (auth?.id === id && auth?.role === "superadmin") {
-    return res.status(400).json({ error: "No puedes desactivar tu propia cuenta de superadmin." });
-  }
-
-  try {
-    const updated = await prisma.user.update({
-      where: { id },
-      data: { isActive: false, canSell: false, isVerified: false },
-      select: {
-        id: true, name: true, email: true, role: true,
-        isVerified: true, canSell: true, isActive: true, deletedAt: true,
-        createdAt: true, // 👈 añadido
-        updatedAt: true,
-      },
-    });
-
-    const latestMap = await getLatestOrganizerAppStatuses([id]);
-    res.json({ ...updated, latestOrganizerAppStatus: latestMap.get(id) ?? null });
-  } catch {
-    res.status(404).json({ error: "Usuario no encontrado" });
-  }
+  const lastStatusMap = await getLatestOrganizerAppStatuses([id]);
+  res.json({
+    ...updated,
+    latestOrganizerAppStatus: lastStatusMap.get(id) ?? null,
+    effectiveCanSell: false,
+  });
 }
 
-/**
- * Reactivar cuenta: isActive=true (no toca canSell/isVerified).
- */
 export async function adminActivateUser(req: Request, res: Response) {
   const id = Number(req.params.id);
+  const updated = await prisma.user.update({
+    where: { id },
+    data: { isActive: true },
+    select: {
+      id: true, name: true, email: true, role: true,
+      canSell: true, isActive: true, deletedAt: true,
+      createdAt: true, updatedAt: true,
+    },
+  });
 
-  try {
-    const updated = await prisma.user.update({
-      where: { id },
-      data: { isActive: true },
-      select: {
-        id: true, name: true, email: true, role: true,
-        isVerified: true, canSell: true, isActive: true, deletedAt: true,
-        createdAt: true, // 👈 añadido
-        updatedAt: true,
-      },
-    });
+  const lastStatusMap = await getLatestOrganizerAppStatuses([id]);
+  const latestOrganizerAppStatus = lastStatusMap.get(id) ?? null;
+  const effectiveCanSell =
+    updated.role === "organizer" && !!updated.canSell && !!updated.isActive && !updated.deletedAt;
 
-    const latestMap = await getLatestOrganizerAppStatuses([id]);
-    res.json({ ...updated, latestOrganizerAppStatus: latestMap.get(id) ?? null });
-  } catch {
-    res.status(404).json({ error: "Usuario no encontrado" });
-  }
+  res.json({ ...updated, latestOrganizerAppStatus, effectiveCanSell });
 }
 
-/**
- * Preview de eliminación: devuelve conteos de datos relacionados.
- */
 export async function adminDeleteUserPreview(req: Request, res: Response) {
   const id = Number(req.params.id);
 
@@ -261,72 +201,40 @@ export async function adminDeleteUserPreview(req: Request, res: Response) {
 
   res.json({
     user,
-    counts: {
-      eventsOwned,
-      reservationsMade,
-      organizerApplications,
-    },
+    counts: { eventsOwned, reservationsMade, organizerApplications },
     hasData: eventsOwned + reservationsMade + organizerApplications > 0,
   });
 }
 
-/**
- * Soft delete + anonimización:
- * - isActive=false, deletedAt=now
- * - canSell=false, isVerified=false
- * - anonimiza name/email/documentUrl
- * - REJECT a solicitudes PENDING/APPROVED
- * - DESHABILITA (approved=false) todos los eventos del usuario
- */
 export async function adminSoftDeleteUser(req: Request, res: Response) {
   const id = Number(req.params.id);
-  const auth = (req as any).user as { id: number; role: string } | undefined;
-
-  // Bloquear borrar superadmin (o a sí mismo) por seguridad
-  const current = await prisma.user.findUnique({
-    where: { id },
-    select: { id: true, role: true },
-  });
-  if (!current) return res.status(404).json({ error: "Usuario no encontrado" });
-  if (current.role === "superadmin") {
-    return res.status(400).json({ error: "No puedes eliminar una cuenta de superadmin." });
-  }
-  if (auth?.id === id && auth?.role === "superadmin") {
-    return res.status(400).json({ error: "No puedes eliminar tu propia cuenta de superadmin." });
-  }
-
   const now = new Date();
   const anonymEmail = `${id}.${now.getTime()}+deleted@invalid.local`;
 
   try {
     const result = await prisma.$transaction(async (tx) => {
-      // 1) Anonimizar y desactivar usuario
       const user = await tx.user.update({
         where: { id },
         data: {
           isActive: false,
           deletedAt: now,
           canSell: false,
-          isVerified: false,
           name: "Cuenta eliminada",
-          email: anonymEmail, // satisface unique
+          email: anonymEmail,
           documentUrl: null,
         },
         select: {
           id: true, name: true, email: true, role: true,
-          isVerified: true, canSell: true, isActive: true, deletedAt: true,
-          createdAt: true, // 👈 añadido
-          updatedAt: true,
+          canSell: true, isActive: true, deletedAt: true,
+          createdAt: true, updatedAt: true,
         },
       });
 
-      // 2) Marcar solicitudes PENDING/APPROVED como REJECTED
       await tx.organizerApplication.updateMany({
         where: { userId: id, status: { in: ["PENDING", "APPROVED"] } },
         data: { status: "REJECTED" },
       });
 
-      // 3) Inhabilitar TODOS los eventos del usuario
       const eventsRes = await tx.event.updateMany({
         where: { organizerId: id },
         data: { approved: false },
@@ -335,18 +243,22 @@ export async function adminSoftDeleteUser(req: Request, res: Response) {
       return { user, eventsDisabled: eventsRes.count };
     });
 
-    const latestMap = await getLatestOrganizerAppStatuses([id]);
+    const lastStatusMap = await getLatestOrganizerAppStatuses([id]);
     return res.json({
       message: "Cuenta eliminada (soft) y eventos inhabilitados",
       user: result.user,
       eventsDisabled: result.eventsDisabled,
-      latestOrganizerAppStatus: latestMap.get(id) ?? null,
+      latestOrganizerAppStatus: lastStatusMap.get(id) ?? null,
+      effectiveCanSell: false,
     });
   } catch (err) {
     console.error("Soft delete error:", err);
     return res.status(500).json({ error: "No se pudo eliminar la cuenta" });
   }
 }
+
+
+
 
 
 

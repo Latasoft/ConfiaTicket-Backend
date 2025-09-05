@@ -2,6 +2,11 @@
 import { Request, Response } from 'express';
 import prisma from '../prisma/client';
 import { env } from '../config/env';
+import fs from 'fs';
+import path from 'path';
+// ⬇️ Provider de payouts (http/sim)
+import { getPayoutProvider } from '../services/payouts/provider';
+import crypto from 'crypto';
 
 // Transbank SDK (Node)
 import {
@@ -27,6 +32,14 @@ function minutesFromNow(min: number) {
 function hoursFrom(date: Date, hours: number) {
   return new Date(date.getTime() + Math.max(0, hours) * 3600 * 1000);
 }
+function newIdempotencyKey(prefix = 'payout') {
+  try {
+    return `${prefix}_${crypto.randomUUID()}`;
+  } catch {
+    // Fallback para Node viejo
+    return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  }
+}
 
 const MAX_PER_PURCHASE = 4;
 const HOLD_MINUTES = 15;
@@ -37,13 +50,29 @@ const UPLOAD_DEADLINE_HOURS = (() => {
   return Number.isFinite(n) && n > 0 ? n : 24;
 })();
 
+// ⏱️ Retención bancaria de la pre-autorización
+const AUTH_HOLD_HOURS = (() => {
+  const n = Number(env.AUTH_HOLD_HOURS ?? 72);
+  return Number.isFinite(n) && n > 0 ? n : 72;
+})();
+
 /** Configura una transacción de WebpayPlus con opciones según .env */
 function tbkTx() {
   const envName = (env.WEBPAY_ENV || 'INTEGRATION').toUpperCase();
   const isProd = envName === 'PRODUCTION';
+
+  // En integración, para captura diferida usar el código DEFERRED
+  const commerceCode = isProd
+    ? (env.WEBPAY_COMMERCE_CODE || '')
+    : IntegrationCommerceCodes.WEBPAY_PLUS_DEFERRED;
+
+  const apiKey = isProd
+    ? (env.WEBPAY_API_KEY || '')
+    : IntegrationApiKeys.WEBPAY;
+
   const options = new Options(
-    env.WEBPAY_COMMERCE_CODE || IntegrationCommerceCodes.WEBPAY_PLUS,
-    env.WEBPAY_API_KEY || IntegrationApiKeys.WEBPAY,
+    commerceCode,
+    apiKey,
     isProd ? Environment.Production : Environment.Integration
   );
   return new WebpayPlus.Transaction(options);
@@ -54,6 +83,25 @@ function makeBuyOrder(reservationId: number) {
   const ts = Date.now().toString(36).toUpperCase();
   const s = `BO-${reservationId}-${ts}`;
   return s.slice(0, 26);
+}
+
+/** Verifica por token (rápido) si el usuario es organizador aprobado */
+function isOrganizerApproved(_req: Request) {
+  // Mantengo la firma por compatibilidad; se usa la versión por DB más abajo
+  return true;
+}
+
+/** ✅ Verifica en BD si el usuario es organizador (puedes afinar según tu schema de aprobación) */
+async function isOrganizerApprovedByDb(req: Request) {
+  const userId = (req as any)?.user?.id as number | undefined;
+  if (!userId) return false;
+
+  const u = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { role: true },
+  });
+
+  return !!u && u.role === 'organizer';
 }
 
 /* ===================== Controladores ===================== */
@@ -79,11 +127,21 @@ export async function createPayment(req: Request, res: Response) {
       return res.status(500).json({ error: 'Falta configurar WEBPAY_RETURN_URL en .env' });
     }
 
+    const isProd = (env.WEBPAY_ENV || 'INTEGRATION').toUpperCase() === 'PRODUCTION';
+    const commerceCodeForEnv = isProd
+      ? (env.WEBPAY_COMMERCE_CODE || '')
+      : IntegrationCommerceCodes.WEBPAY_PLUS_DEFERRED;
+
     const { reservation, payment, event } = await prisma.$transaction(async (tx) => {
       const event = await tx.event.findUnique({ where: { id: eventId } });
       if (!event) throw new Error('Evento no encontrado');
       if (!event.approved) throw new Error('Evento no aprobado');
       if (new Date(event.date).getTime() <= Date.now()) throw new Error('El evento ya inició o finalizó');
+
+      // precio válido
+      if (!Number.isFinite(event.price) || (event.price as any) <= 0) {
+        throw new Error('Precio del evento inválido');
+      }
 
       // 🚫 organizador no puede comprar su propio evento
       if (event.organizerId === userId) {
@@ -123,7 +181,7 @@ export async function createPayment(req: Request, res: Response) {
         const qty = Math.min(requestedQty, remaining);
         if (qty < 1) throw new Error(`Solo quedan ${remaining} cupos disponibles`);
 
-        const amount = (event.price || 0) * qty;
+        const amount = Math.round(event.price) * qty; // CLP entero
 
         reservation = await tx.reservation.create({
           data: {
@@ -132,11 +190,12 @@ export async function createPayment(req: Request, res: Response) {
             quantity: qty,
             status: 'PENDING_PAYMENT',
             amount,
-            expiresAt: minutesFromNow(HOLD_MINUTES),
+            expiresAt: minutesFromNow(HOLD_MINUTES), // hold corto mientras vuelve de Webpay
+            fulfillmentStatus: 'WAITING_TICKET',
           },
         });
       } else {
-        // Refrescar hold (no tocamos cantidad ni monto aquí para mantener consistencia)
+        // Refrescar hold (no tocamos cantidad ni monto)
         reservation = await tx.reservation.update({
           where: { id: reservation.id },
           data: { expiresAt: minutesFromNow(HOLD_MINUTES) },
@@ -153,7 +212,7 @@ export async function createPayment(req: Request, res: Response) {
       const amount = reservation.amount;
 
       if (payment) {
-        if (payment.status === 'COMMITTED') {
+        if (payment.status === 'CAPTURED' || payment.status === 'COMMITTED') {
           throw new Error('La reserva ya fue pagada');
         }
         payment = await tx.payment.update({
@@ -173,7 +232,8 @@ export async function createPayment(req: Request, res: Response) {
             cardLast4: null,
             vci: null,
             environment: env.WEBPAY_ENV || 'INTEGRATION',
-            commerceCode: env.WEBPAY_COMMERCE_CODE || IntegrationCommerceCodes.WEBPAY_PLUS,
+            commerceCode: commerceCodeForEnv,
+            isDeferredCapture: true,
           },
         });
       } else {
@@ -185,7 +245,8 @@ export async function createPayment(req: Request, res: Response) {
             buyOrder,
             sessionId,
             environment: env.WEBPAY_ENV || 'INTEGRATION',
-            commerceCode: env.WEBPAY_COMMERCE_CODE || IntegrationCommerceCodes.WEBPAY_PLUS,
+            commerceCode: commerceCodeForEnv,
+            isDeferredCapture: true,
           },
         });
       }
@@ -230,7 +291,11 @@ export async function createPayment(req: Request, res: Response) {
  * Webpay envía:
  *  - éxito: token_ws
  *  - abortado: TBK_TOKEN (+ TBK_ORDEN_COMPRA, TBK_ID_SESION)
- * Responde JSON o redirige a WEBPAY_FINAL_URL si está configurada.
+ *
+ * En captura diferida:
+ *  - Si OK → guardamos AUTHORIZED + authorizationCode + authorizationExpiresAt.
+ *  - NO marcamos la reserva como PAID (se capturará tras aprobar ticket).
+ *  - NUEVO: si el organizador tiene ConnectedAccount, guardamos destinationAccountId en Payment.
  */
 export async function commitPayment(req: Request, res: Response) {
   try {
@@ -238,7 +303,7 @@ export async function commitPayment(req: Request, res: Response) {
       (req.body?.token_ws ?? req.query?.token_ws ?? '')
     ).trim();
 
-    // Caso abortado por el usuario (puede venir por POST o GET)
+    // Caso abortado por el usuario
     const tbkToken = String(
       (req.body?.TBK_TOKEN ?? req.query?.TBK_TOKEN ?? '')
     ).trim();
@@ -248,51 +313,21 @@ export async function commitPayment(req: Request, res: Response) {
         (req.body?.TBK_ORDEN_COMPRA ?? req.query?.TBK_ORDEN_COMPRA ?? '')
       ).trim();
 
-      let reservationId: number | undefined;
-      let eventId: number | undefined;
-
+      // Marca como ABORTED si hay match local
       if (tbkOrder) {
-        // Marcar como ABORTED y, si existe, obtener datos para el front
-        const p = await prisma.payment.findFirst({
+        await prisma.payment.updateMany({
           where: { buyOrder: tbkOrder },
-          include: { reservation: true },
-          orderBy: { createdAt: 'desc' },
+          data: { status: 'ABORTED' },
         });
-        if (p) {
-          // 🔧 null-safe
-          reservationId = p.reservationId ?? undefined;
-          eventId = p.reservation?.eventId ?? undefined;
-          await prisma.payment.update({
-            where: { id: p.id },
-            data: { status: 'ABORTED' },
-          });
-        } else {
-          // Si no lo encontramos, igual marcamos por buyOrder por si acaso
-          await prisma.payment.updateMany({
-            where: { buyOrder: tbkOrder },
-            data: { status: 'ABORTED' },
-          });
-        }
       }
-
-      const payload = {
-        ok: false,
-        aborted: true,
-        error: 'Pago abortado por el usuario',
-        buyOrder: tbkOrder || null,
-        reservationId: reservationId ?? null,
-        eventId: eventId ?? null,
-      };
 
       if (env.WEBPAY_FINAL_URL) {
         const u = new URL(env.WEBPAY_FINAL_URL);
         u.searchParams.set('status', 'aborted');
         if (tbkOrder) u.searchParams.set('buyOrder', tbkOrder);
-        if (reservationId) u.searchParams.set('reservationId', String(reservationId));
-        if (eventId) u.searchParams.set('eventId', String(eventId));
         return res.redirect(303, u.toString());
       }
-      return res.status(200).json(payload);
+      return res.status(200).json({ ok: false, aborted: true, buyOrder: tbkOrder || null });
     }
 
     if (!token) return res.status(400).json({ error: 'token_ws faltante' });
@@ -301,114 +336,104 @@ export async function commitPayment(req: Request, res: Response) {
     const tx = tbkTx();
     const commit = await tx.commit(token);
 
-    // Busca el Payment por token + reserva + evento para validar "own event"
     const payment = await prisma.payment.findUnique({
       where: { token },
-      include: { reservation: { include: { event: { select: { organizerId: true } } } } },
+      include: {
+        reservation: {
+          include: {
+            event: { select: { organizerId: true } },
+            buyer: { select: { id: true } },
+          }
+        },
+      },
     });
     if (!payment) {
       return res.status(404).json({ error: 'Transacción no encontrada' });
     }
 
-    const isApproved = commit.response_code === 0;
-
-    // ¿El comprador es el mismo organizador del evento?
+    const isApproved = !!commit && commit.response_code === 0;
     const isOwnEvent =
       !!payment.reservation &&
       payment.reservation.event?.organizerId === payment.reservation.buyerId;
 
-    let uploadDeadlineAtISO: string | undefined;
+    // Si autorizado correctamente, fijamos expiración de la autorización
+    const authExpiresAt = isApproved ? hoursFrom(now(), AUTH_HOLD_HOURS) : null;
 
-    const updated = await prisma.$transaction(async (txp) => {
-      // Siempre registramos los datos devueltos por TBK
-      const p = await txp.payment.update({
+    // Plazo para que el vendedor suba el/los tickets
+    const uploadDeadline = isApproved ? hoursFrom(now(), UPLOAD_DEADLINE_HOURS) : null;
+
+    // NUEVO: detectar cuenta conectada del organizador para enrutar payout
+    let destAccountId: number | null = null;
+    if (isApproved && !isOwnEvent && payment.reservation?.event?.organizerId) {
+      const acct = await prisma.connectedAccount.findUnique({
+        where: { userId: payment.reservation.event.organizerId },
+      });
+      if (acct && acct.payoutsEnabled) destAccountId = acct.id;
+    }
+    // Mantener si ya existía (no sobreescribir con null)
+    const finalDestAccountId = payment.destinationAccountId ?? destAccountId ?? null;
+
+    await prisma.$transaction(async (txp) => {
+      // Registra la info devuelta por TBK
+      await txp.payment.update({
         where: { id: payment.id },
         data: {
-          status: isApproved && !isOwnEvent ? 'COMMITTED' : 'FAILED',
-          authorizationCode: commit.authorization_code || null,
-          paymentTypeCode: commit.payment_type_code || null,
-          installmentsNumber: commit.installments_number ?? null,
-          responseCode: commit.response_code ?? null,
-          accountingDate: (commit.accounting_date as any) || null,
-          transactionDate: (commit.transaction_date as any) || null,
-          cardLast4: commit.card_detail?.card_number
-            ? String(commit.card_detail.card_number).slice(-4)
+          status: isApproved && !isOwnEvent ? 'AUTHORIZED' : 'FAILED',
+          authorizationCode: (commit as any)?.authorization_code || null,
+          paymentTypeCode: (commit as any)?.payment_type_code || null,
+          installmentsNumber: (commit as any)?.installments_number ?? null,
+          responseCode: (commit as any)?.response_code ?? null,
+          accountingDate: (commit as any)?.accounting_date || null,
+          transactionDate: (commit as any)?.transaction_date || null,
+          cardLast4: (commit as any)?.card_detail?.card_number
+            ? String((commit as any).card_detail.card_number).slice(-4)
             : null,
-          vci: commit.vci || null,
+          vci: (commit as any)?.vci || null,
+          authorizedAmount: isApproved ? payment.amount : null,
+          authorizationExpiresAt: authExpiresAt,
+          destinationAccountId: finalDestAccountId,
         },
-        include: { reservation: true },
       });
 
-      const resId = p.reservationId;
-      if (resId == null) throw new Error('Pago sin reserva asociada');
-
-      if (isOwnEvent) {
-        // 🔒 Salvaguarda: cancelar la reserva si es del propio evento
+      // Reserva: no pasamos a PAID; dejamos WAITING_TICKET y fijamos deadlines
+      if (payment.reservationId) {
         await txp.reservation.update({
-          where: { id: resId },
-          data: { status: 'CANCELED' },
-        });
-        return p;
-      }
-
-      if (isApproved) {
-        // Pago correcto → marcar como PAID, iniciar flujo de ticket y fijar plazo de subida
-        const paidTime = now();
-        const deadline = hoursFrom(paidTime, UPLOAD_DEADLINE_HOURS);
-
-        const r = await txp.reservation.update({
-          where: { id: resId },
-          data: {
-            status: 'PAID',
-            paidAt: paidTime,
-            fulfillmentStatus: 'WAITING_TICKET',
-            ticketUploadDeadlineAt: deadline,
-          } as any,
-          select: { ticketUploadDeadlineAt: true },
-        });
-
-        uploadDeadlineAtISO = r.ticketUploadDeadlineAt
-          ? new Date(r.ticketUploadDeadlineAt).toISOString()
-          : undefined;
-      } else {
-        // Falló → liberar cupos
-        await txp.reservation.update({
-          where: { id: resId },
-          data: { status: 'CANCELED' },
+          where: { id: payment.reservationId },
+          data: isApproved && !isOwnEvent
+            ? {
+                // mantenemos PENDING_PAYMENT (no pagado)
+                fulfillmentStatus: 'WAITING_TICKET',
+                ticketUploadDeadlineAt: uploadDeadline,
+                // extendemos el hold de cupos al vencimiento de la autorización
+                expiresAt: authExpiresAt,
+              }
+            : { status: 'CANCELED' },
         });
       }
-
-      return p;
     });
 
     const payload: any = {
       ok: isApproved && !isOwnEvent,
       token,
-      buyOrder: updated.buyOrder,
-      amount: updated.amount,
-      authorizationCode: updated.authorizationCode,
-      paymentTypeCode: updated.paymentTypeCode,
-      installmentsNumber: updated.installmentsNumber,
-      responseCode: commit.response_code,
-      transactionDate: commit.transaction_date,
-      cardLast4: updated.cardLast4,
-      reservationId: updated.reservationId,
-      ...(isOwnEvent ? { error: 'CANNOT_BUY_OWN_EVENT' } : null),
+      buyOrder: payment.buyOrder,
+      amount: payment.amount,
+      authorizationCode: (commit as any)?.authorization_code,
+      responseCode: (commit as any)?.response_code,
+      reservationId: payment.reservationId,
+      authorizationExpiresAt: authExpiresAt,
+      uploadDeadlineAt: uploadDeadline,
+      note: 'Pago pre-autorizado. Se capturará cuando el admin apruebe el/los ticket(s).',
     };
-
-    if (uploadDeadlineAtISO) {
-      payload.uploadDeadlineAt = uploadDeadlineAtISO; // para el front
-    }
 
     if (env.WEBPAY_FINAL_URL) {
       const u = new URL(env.WEBPAY_FINAL_URL);
-      u.searchParams.set('status', payload.ok ? 'success' : (isOwnEvent ? 'own-event-forbidden' : 'failed'));
+      u.searchParams.set('status', payload.ok ? 'authorized' : (isOwnEvent ? 'own-event-forbidden' : 'failed'));
       u.searchParams.set('token', token);
-      u.searchParams.set('buyOrder', updated.buyOrder);
-      u.searchParams.set('amount', String(updated.amount));
-      u.searchParams.set('reservationId', String(updated.reservationId));
-      if (uploadDeadlineAtISO) u.searchParams.set('uploadDeadlineAt', uploadDeadlineAtISO);
-      if (isOwnEvent) u.searchParams.set('error', 'CANNOT_BUY_OWN_EVENT');
+      u.searchParams.set('buyOrder', payment.buyOrder || '');
+      u.searchParams.set('amount', String(payment.amount));
+      if (payment.reservationId) u.searchParams.set('reservationId', String(payment.reservationId));
+      if (authExpiresAt) u.searchParams.set('authorizationExpiresAt', authExpiresAt.toISOString());
+      if (uploadDeadline) u.searchParams.set('uploadDeadlineAt', uploadDeadline.toISOString());
       return res.redirect(303, u.toString());
     }
 
@@ -416,6 +441,131 @@ export async function commitPayment(req: Request, res: Response) {
   } catch (err: any) {
     console.error('commitPayment error:', err);
     return res.status(500).json({ error: err?.message || 'Error al confirmar el pago' });
+  }
+}
+
+/**
+ * POST /api/payments/capture
+ * Body: { reservationId: number }
+ * Debe ser llamado cuando el ADMIN aprueba el/los ticket(s) de la reserva.
+ * - Verifica que Payment esté AUTHORIZED y no vencido.
+ * - Ejecuta Transaction.capture(token, buy_order, authorization_code, amount).
+ * - Si OK: Payment=CAPTURED, Reservation=PAID y crea Payout (PENDING) al organizador (si tiene ConnectedAccount).
+ */
+export async function capturePayment(req: Request, res: Response) {
+  try {
+    const reservationId = toInt(req.body?.reservationId);
+    if (!reservationId) return res.status(400).json({ error: 'reservationId requerido' });
+
+    // Carga Payment + Reserva + Organizador
+    const payment = await prisma.payment.findFirst({
+      where: { reservationId },
+      include: {
+        reservation: {
+          include: {
+            event: { select: { id: true, organizerId: true, price: true } }
+          }
+        },
+        destinationAccount: true, // ConnectedAccount (si existe)
+      },
+    });
+    if (!payment || !payment.reservation)
+      return res.status(404).json({ error: 'Pago/reserva no encontrados' });
+
+    if (payment.status !== 'AUTHORIZED')
+      return res.status(400).json({ error: 'La transacción no está pre-autorizada' });
+
+    if (!payment.token || !payment.buyOrder || !payment.authorizationCode)
+      return res.status(400).json({ error: 'Faltan datos para capturar (token/buyOrder/authorizationCode)' });
+
+    if (payment.authorizationExpiresAt && payment.authorizationExpiresAt < now())
+      return res.status(400).json({ error: 'La autorización expiró; reintenta autorizar' });
+
+    const captureAmount = payment.amount;
+
+    // Ejecuta captura en Webpay
+    const tx = tbkTx();
+    const cap = await tx.capture(
+      payment.token,
+      payment.buyOrder,
+      payment.authorizationCode,
+      captureAmount
+    );
+
+    // cap.response_code === 0 indica captura exitosa
+    const ok = cap?.response_code === 0;
+    if (!ok) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Captura rechazada por el PSP',
+        responseCode: cap?.response_code ?? null,
+      });
+    }
+
+    // Posible fallback: si aún no hay destinationAccountId, tratamos de resolverlo ahora
+    let destAccountId: number | null = payment.destinationAccountId ?? null;
+    if (!destAccountId && payment.reservation?.event?.organizerId) {
+      const acct = await prisma.connectedAccount.findUnique({
+        where: { userId: payment.reservation.event.organizerId },
+      });
+      if (acct && acct.payoutsEnabled) destAccountId = acct.id;
+    }
+
+    // Suponemos comisión de aplicación 0 por ahora (ajústalo cuando definas tu modelo de fees)
+    const applicationFeeAmount = payment.applicationFeeAmount ?? 0;
+    const computedNet = Math.max(0, captureAmount - applicationFeeAmount);
+
+    // Actualiza BD: Payment CAPTURED, Reservation PAID, crea Payout PENDING
+    const updated = await prisma.$transaction(async (txp) => {
+      const pay = await txp.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: 'CAPTURED',
+          capturedAmount: captureAmount,
+          capturedAt: now(),
+          captureId: String(cap?.authorization_code ?? '') || null, // Transbank devuelve authorization_code para captura
+          destinationAccountId: destAccountId ?? payment.destinationAccountId ?? null,
+          // Si aún no teníamos netAmount, lo fijamos ahora con el cálculo simple
+          netAmount: payment.netAmount ?? computedNet,
+        },
+        include: { reservation: true },
+      });
+
+      const resv = await txp.reservation.update({
+        where: { id: pay.reservationId! },
+        data: { status: 'PAID', paidAt: now(), fulfillmentStatus: 'TICKET_APPROVED', approvedAt: now() },
+      });
+
+      // Crea un Payout PENDING si hay cuenta conectada del organizador
+      let payout = null;
+      if (destAccountId) {
+        const netAmountForPayout = pay.netAmount ?? computedNet;
+        payout = await txp.payout.create({
+          data: {
+            accountId: destAccountId,
+            reservationId: resv.id,
+            paymentId: pay.id,
+            amount: netAmountForPayout,
+            status: 'PENDING',
+            currency: 'CLP',
+            idempotencyKey: newIdempotencyKey(), // <-- requerido por schema
+          },
+        });
+      }
+
+      return { pay, resv, payout };
+    });
+
+    return res.status(200).json({
+      ok: true,
+      capturedAmount: captureAmount,
+      paymentId: updated.pay.id,
+      reservationId: updated.resv.id,
+      payoutId: updated.payout?.id ?? null,
+    });
+  } catch (err: any) {
+    console.error('capturePayment error:', err);
+    return res.status(500).json({ error: err?.message || 'Error al capturar el pago' });
   }
 }
 
@@ -439,7 +589,7 @@ export async function getPaymentStatus(req: Request, res: Response) {
 
     return res.status(200).json({
       token,
-      tbkStatus: status, // puede ser null si TBK no lo encuentra (p.ej. token inválido)
+      tbkStatus: status, // puede ser null si TBK no lo encuentra
       local: {
         id: payment.id,
         status: payment.status,
@@ -447,6 +597,8 @@ export async function getPaymentStatus(req: Request, res: Response) {
         buyOrder: payment.buyOrder,
         reservationId: payment.reservationId,
         updatedAt: payment.updatedAt,
+        authorizationExpiresAt: payment.authorizationExpiresAt,
+        capturedAt: payment.capturedAt,
       },
     });
   } catch (err: any) {
@@ -480,6 +632,8 @@ export async function getPaymentByBuyOrder(req: Request, res: Response) {
         buyOrder: p.buyOrder,
         reservationId: p.reservationId,
         updatedAt: p.updatedAt,
+        authorizationExpiresAt: p.authorizationExpiresAt,
+        capturedAt: p.capturedAt,
       },
     });
   } catch (err: any) {
@@ -501,7 +655,6 @@ export async function getMyPending(req: Request, res: Response) {
     const eventId = toInt(req.query?.eventId);
     if (!eventId) return res.status(400).json({ error: 'eventId requerido' });
 
-    // Busca la reserva pendiente vigente
     const r = await prisma.reservation.findFirst({
       where: {
         buyerId: userId,
@@ -525,14 +678,12 @@ export async function getMyPending(req: Request, res: Response) {
       return res.status(200).json({ exists: false });
     }
 
-    // Último intento de pago asociado (opcional)
     const lastPayment = await prisma.payment.findFirst({
       where: { reservationId: r.id },
       orderBy: { createdAt: 'desc' },
-      select: { id: true, status: true, token: true, buyOrder: true, createdAt: true },
+      select: { id: true, status: true, token: true, buyOrder: true, createdAt: true, authorizationExpiresAt: true },
     });
 
-    // segundos restantes (maneja expiresAt nullable)
     const expMs = r.expiresAt ? new Date(r.expiresAt).getTime() : Date.now();
     const secondsLeft = Math.max(0, Math.floor((expMs - Date.now()) / 1000));
 
@@ -562,7 +713,6 @@ export async function getMyPending(req: Request, res: Response) {
  * POST /api/payments/restart
  * Body: { reservationId: number }
  * Crea/actualiza la transacción Webpay reutilizando la misma reserva (si sigue vigente).
- * (Actualiza el Payment existente si ya hay uno para esa reservationId).
  */
 export async function restartPayment(req: Request, res: Response) {
   try {
@@ -605,13 +755,18 @@ export async function restartPayment(req: Request, res: Response) {
     const sessionId = `u${userId}-r${reservation.id}-${Date.now().toString(36)}`;
     const amount = reservation.amount;
 
+    const isProd = (env.WEBPAY_ENV || 'INTEGRATION').toUpperCase() === 'PRODUCTION';
+    const commerceCodeForEnv = isProd
+      ? (env.WEBPAY_COMMERCE_CODE || '')
+      : IntegrationCommerceCodes.WEBPAY_PLUS_DEFERRED;
+
     // Busca payment por reservationId (único) y actualiza o crea
     let payment = await prisma.payment.findUnique({
       where: { reservationId: reservation.id },
     });
 
     if (payment) {
-      if (payment.status === 'COMMITTED') {
+      if (payment.status === 'CAPTURED' || payment.status === 'COMMITTED') {
         return res.status(400).json({ error: 'La reserva ya fue pagada' });
       }
       payment = await prisma.payment.update({
@@ -631,7 +786,8 @@ export async function restartPayment(req: Request, res: Response) {
           cardLast4: null,
           vci: null,
           environment: env.WEBPAY_ENV || 'INTEGRATION',
-          commerceCode: env.WEBPAY_COMMERCE_CODE || IntegrationCommerceCodes.WEBPAY_PLUS,
+          commerceCode: commerceCodeForEnv,
+          isDeferredCapture: true,
         },
       });
     } else {
@@ -643,7 +799,8 @@ export async function restartPayment(req: Request, res: Response) {
           buyOrder,
           sessionId,
           environment: env.WEBPAY_ENV || 'INTEGRATION',
-          commerceCode: env.WEBPAY_COMMERCE_CODE || IntegrationCommerceCodes.WEBPAY_PLUS,
+          commerceCode: commerceCodeForEnv,
+          isDeferredCapture: true,
         },
       });
     }
@@ -674,7 +831,7 @@ export async function restartPayment(req: Request, res: Response) {
 /**
  * POST /api/payments/refund
  * Body: { token?: string, buyOrder?: string, amount?: number }
- * - Si no envías amount → reembolsa el saldo pendiente (total menos lo ya reembolsado).
+ * - Sólo para transacciones capturadas (CAPTURED). Si no envías amount → reembolsa saldo pendiente.
  */
 export async function refundPayment(req: Request, res: Response) {
   try {
@@ -691,8 +848,8 @@ export async function refundPayment(req: Request, res: Response) {
     }
 
     if (!payment) return res.status(404).json({ error: 'Pago no encontrado' });
-    if (payment.status !== 'COMMITTED')
-      return res.status(400).json({ error: 'Solo se pueden reembolsar pagos confirmados' });
+    if (payment.status !== 'CAPTURED' && payment.status !== 'REFUNDED')
+      return res.status(400).json({ error: 'Solo se pueden reembolsar pagos capturados' });
 
     const already = payment.refundedAmount ?? 0;
     const maxRefundable = Math.max(0, payment.amount - already);
@@ -729,6 +886,793 @@ export async function refundPayment(req: Request, res: Response) {
     return res.status(500).json({ error: err?.message || 'Error al reembolsar' });
   }
 }
+
+/* ===================== Payouts ===================== */
+
+/**
+ * GET /api/payments/payouts/my?status=PENDING&page=1&pageSize=10&q=texto
+ * Lista los payouts del organizador autenticado (y aprobado).
+ */
+export async function listMyPayouts(req: Request, res: Response) {
+  try {
+    const userId = (req as any)?.user?.id as number | undefined;
+    if (!userId) return res.status(401).json({ error: 'No autenticado' });
+
+    // ✅ verificación robusta compatible con tu schema
+    const okOrganizer = await isOrganizerApprovedByDb(req);
+    if (!okOrganizer) {
+      return res.status(403).json({ error: 'FORBIDDEN', message: 'No aprobado como organizador' });
+    }
+
+    const page = Math.max(1, parseInt(String(req.query?.page ?? '1'), 10) || 1);
+    const pageSize = Math.min(50, Math.max(1, parseInt(String(req.query?.pageSize ?? '10'), 10) || 10));
+    const skip = (page - 1) * pageSize;
+
+    // Filtro de status (opcional)
+    const rawStatus = String(req.query?.status ?? '').trim().toUpperCase();
+    const VALID = new Set(['PENDING', 'PAID', 'SCHEDULED', 'FAILED', 'IN_TRANSIT', 'CANCELED']);
+    const status = VALID.has(rawStatus) ? rawStatus : undefined;
+
+    // Search (q): numérico (ids) y texto (buyOrder, event.title)
+    const q = String(req.query?.q ?? '').trim();
+    const maybeId = Number(q);
+    const isNumeric = Number.isFinite(maybeId);
+
+    // Todas las cuentas conectadas del usuario (normalmente 1)
+    const accounts = await prisma.connectedAccount.findMany({ where: { userId } });
+    const accountIds = accounts.map(a => a.id);
+    if (accountIds.length === 0) {
+      return res.status(200).json({ items: [], total: 0, page, pageSize });
+    }
+
+    const where: any = { accountId: { in: accountIds } };
+    if (status) where.status = status;
+
+    if (q) {
+      const or: any[] = [
+        { payment: { buyOrder: { contains: q, mode: 'insensitive' } } },
+        { reservation: { event: { title: { contains: q, mode: 'insensitive' } } } },
+      ];
+      if (isNumeric) {
+        or.push({ id: maybeId });
+        or.push({ paymentId: maybeId });
+        or.push({ reservationId: maybeId });
+      }
+      where.OR = or;
+    }
+
+    const [total, rows] = await Promise.all([
+      prisma.payout.count({ where }),
+      prisma.payout.findMany({
+        where,
+        orderBy: { id: 'desc' },
+        skip,
+        take: pageSize,
+        select: {
+          id: true,
+          accountId: true,
+          paymentId: true,
+          reservationId: true,
+          amount: true,
+          currency: true,
+          status: true,
+          scheduledFor: true,
+          paidAt: true,
+          pspPayoutId: true,
+          // contexto útil
+          payment: { select: { buyOrder: true, netAmount: true, capturedAt: true } },
+          reservation: {
+            select: {
+              id: true,
+              event: { select: { id: true, title: true, date: true } },
+            },
+          },
+        },
+      }),
+    ]);
+
+    // Normalizamos un poco la respuesta
+    const items = rows.map((p) => ({
+      id: p.id,
+      status: p.status,
+      amount: p.amount,
+      currency: p.currency,
+      paidAt: p.paidAt,
+      scheduledFor: p.scheduledFor,
+      reservationId: p.reservationId,
+      paymentId: p.paymentId,
+      buyOrder: p.payment?.buyOrder ?? null,
+      netAmount: p.payment?.netAmount ?? null,
+      capturedAt: p.payment?.capturedAt ?? null,
+      event: p.reservation?.event ?? null,
+    }));
+
+    return res.status(200).json({ items, total, page, pageSize });
+  } catch (err: any) {
+    console.error('listMyPayouts error:', err);
+    return res.status(500).json({ error: err?.message || 'Error listando payouts' });
+  }
+}
+
+/**
+ * POST /api/payments/payouts/:id/mark-paid
+ * Marca un payout como pagado (simulación). Idempotente.
+ */
+export async function adminMarkPayoutPaid(req: Request, res: Response) {
+  try {
+    const payoutId = Number(req.params.id);
+    if (!Number.isFinite(payoutId)) {
+      return res.status(400).json({ error: 'ID inválido' });
+    }
+
+    const p = await prisma.payout.findUnique({ where: { id: payoutId } });
+    if (!p) return res.status(404).json({ error: 'Payout no encontrado' });
+
+    // Idempotencia: si ya está pagado, responder OK
+    if (p.status === 'PAID') {
+      return res.status(200).json({
+        ok: true,
+        payout: p,
+        note: 'Payout ya estaba marcado como pagado',
+      });
+    }
+
+    const upd = await prisma.payout.update({
+      where: { id: payoutId },
+      data: {
+        status: 'PAID',
+        paidAt: now(),
+        pspPayoutId: p.pspPayoutId ?? `SIM_PAID_${Date.now()}`,
+      },
+    });
+
+    return res.status(200).json({ ok: true, payout: upd });
+  } catch (err: any) {
+    console.error('adminMarkPayoutPaid error:', err);
+    return res.status(500).json({ error: err?.message || 'Error marcando payout como pagado' });
+  }
+}
+
+// ===================== ADMIN: listar payouts =====================
+
+/**
+ * GET /api/payments/admin/payouts
+ * Query:
+ *  - page, pageSize
+ *  - status: PENDING|PAID|SCHEDULED|FAILED|IN_TRANSIT|CANCELED
+ *  - q: texto libre (buyOrder, título evento, pspPayoutId, nombre/email organizador) o número (ids)
+ *  - organizerId?: filtra por organizador (userId)
+ *  - eventId?: filtra por evento
+ */
+export async function adminListPayouts(req: Request, res: Response) {
+  try {
+    const page = Math.max(1, parseInt(String(req.query?.page ?? "1"), 10) || 1);
+    const pageSize = Math.min(
+      100,
+      Math.max(1, parseInt(String(req.query?.pageSize ?? "20"), 10) || 20)
+    );
+    const skip = (page - 1) * pageSize;
+
+    const rawStatus = String(req.query?.status ?? "").trim().toUpperCase();
+    const VALID = new Set(["PENDING", "PAID", "SCHEDULED", "FAILED", "IN_TRANSIT", "CANCELED"]);
+    const status = VALID.has(rawStatus) ? rawStatus : undefined;
+
+    const q = String(req.query?.q ?? "").trim();
+    const maybeId = Number(q);
+    const isNumeric = Number.isFinite(maybeId);
+
+    const organizerId = Number(req.query?.organizerId);
+    const hasOrganizer = Number.isFinite(organizerId);
+
+    const eventId = Number(req.query?.eventId);
+    const hasEvent = Number.isFinite(eventId);
+
+    const where: any = {};
+
+    if (status) where.status = status;
+    if (hasOrganizer) {
+      // filtra por el dueño de la ConnectedAccount
+      where.account = { userId: organizerId };
+    }
+    if (hasEvent) {
+      // filtra por evento asociado a la reserva
+      where.reservation = { eventId };
+    }
+
+    if (q) {
+      const OR: any[] = [
+        { pspPayoutId: { contains: q } },
+        { payment: { buyOrder: { contains: q } } },
+        { reservation: { event: { title: { contains: q } } } },
+        { account: { user: { name: { contains: q } } } },
+        { account: { user: { email: { contains: q } } } },
+      ];
+      if (isNumeric) {
+        OR.push({ id: maybeId });
+        OR.push({ paymentId: maybeId });
+        OR.push({ reservationId: maybeId });
+        OR.push({ accountId: maybeId });
+      }
+      where.OR = OR;
+    }
+
+    const [total, rows] = await Promise.all([
+      prisma.payout.count({ where }),
+      prisma.payout.findMany({
+        where,
+        orderBy: { id: "desc" },
+        skip,
+        take: pageSize,
+        select: {
+          id: true,
+          accountId: true,
+          paymentId: true,
+          reservationId: true,
+          amount: true,
+          currency: true,
+          status: true,
+          scheduledFor: true,
+          paidAt: true,
+          pspPayoutId: true,
+          createdAt: true,
+          updatedAt: true,
+          // contexto
+          account: {
+            select: {
+              userId: true,
+              user: { select: { id: true, name: true, email: true } },
+            },
+          },
+          payment: {
+            select: { buyOrder: true, netAmount: true, capturedAt: true },
+          },
+          reservation: {
+            select: {
+              id: true,
+              event: {
+                select: {
+                  id: true,
+                  title: true,
+                  date: true,
+                  organizer: { select: { id: true, name: true, email: true } },
+                },
+              },
+            },
+          },
+        },
+      }),
+    ]);
+
+    const items = rows.map((p) => ({
+      id: p.id,
+      accountId: p.accountId,
+      paymentId: p.paymentId,
+      reservationId: p.reservationId,
+      amount: p.amount,
+      currency: p.currency,
+      status: p.status,
+      scheduledFor: p.scheduledFor,
+      paidAt: p.paidAt,
+      pspPayoutId: p.pspPayoutId,
+      createdAt: p.createdAt,
+      updatedAt: p.updatedAt,
+      // extras
+      buyOrder: p.payment?.buyOrder ?? null,
+      netAmount: p.payment?.netAmount ?? null,
+      capturedAt: p.payment?.capturedAt ?? null,
+      event: p.reservation?.event
+        ? { id: p.reservation.event.id, title: p.reservation.event.title, date: p.reservation.event.date }
+        : null,
+      organizer: p.reservation?.event?.organizer
+        ? {
+            id: p.reservation.event.organizer.id,
+            name: p.reservation.event.organizer.name,
+            email: p.reservation.event.organizer.email,
+          }
+        : (p as any).account?.user
+        ? {
+            id: (p as any).account.user.id,
+            name: (p as any).account.user.name,
+            email: (p as any).account.user.email,
+          }
+        : null,
+    }));
+
+    return res.status(200).json({ items, total, page, pageSize });
+  } catch (err: any) {
+    console.error("adminListPayouts error:", err);
+    return res.status(500).json({ error: err?.message || "Error listando payouts (admin)" });
+  }
+}
+
+
+/**
+ * POST /api/payments/admin/payouts/run
+ * Ejecuta pagos reales (driver http) contra el PSP o tu adapter.
+ * Body/Query: { limit?: number }
+ */
+export async function adminRunPayoutsNow(req: Request, res: Response) {
+  try {
+    const limitRaw = (req.body?.limit ?? req.query?.limit) as any;
+    const limit = Math.max(1, Math.min(500, toInt(limitRaw, 50)));
+
+    const provider = getPayoutProvider();
+
+    // Traemos PENDING (puedes incluir FAILED reintentables si quieres)
+    const pendings = await prisma.payout.findMany({
+      where: { status: 'PENDING' },
+      orderBy: { id: 'asc' },
+      take: limit,
+      include: {
+        account: true,
+      },
+    });
+
+    if (pendings.length === 0) {
+      return res.status(200).json({ ok: true, processed: 0, results: [] });
+    }
+
+    const results: Array<{
+      payoutId: number;
+      status?: string;
+      paidAt?: string | null;
+      error?: string | null;
+    }> = [];
+
+    const isAccountReady = (acc?: {
+      payoutsEnabled: boolean;
+      payoutBankName?: string | null;
+      payoutAccountType?: string | null;
+      payoutAccountNumber?: string | null;
+      payoutHolderName?: string | null;
+      payoutHolderRut?: string | null;
+    }) =>
+      !!acc?.payoutsEnabled &&
+      !!acc?.payoutBankName &&
+      !!acc?.payoutAccountType &&
+      !!acc?.payoutAccountNumber &&
+      !!acc?.payoutHolderName &&
+      !!acc?.payoutHolderRut;
+
+    for (const p of pendings) {
+      try {
+        // Validaciones mínimas
+        if (!p.account) {
+          await prisma.payout.update({
+            where: { id: p.id },
+            data: {
+              status: 'FAILED',
+              failureMessage: 'ConnectedAccount no encontrado',
+            },
+          });
+          results.push({
+            payoutId: p.id,
+            error: 'ConnectedAccount no encontrado',
+          });
+          continue;
+        }
+        if (!isAccountReady(p.account)) {
+          await prisma.payout.update({
+            where: { id: p.id },
+            data: {
+              status: 'FAILED',
+              failureMessage: 'Datos bancarios incompletos o payouts deshabilitados',
+            },
+          });
+          results.push({
+            payoutId: p.id,
+            error: 'Datos bancarios incompletos o payouts deshabilitados',
+          });
+          continue;
+        }
+
+        // Mapeo de cuenta destino para el provider http
+        const account = {
+          bankName: p.account.payoutBankName!,
+          accountType: String(p.account.payoutAccountType!) as any, // "VISTA"|"CORRIENTE"|"AHORRO"|"RUT"
+          accountNumber: p.account.payoutAccountNumber!,
+          holderName: p.account.payoutHolderName!,
+          holderRut: p.account.payoutHolderRut!,
+        };
+
+        const idempotencyKey = `payout-${p.id}`; // idempotente por payout
+
+        const out = await provider.pay({
+          payoutId: p.id,
+          amount: p.amount,
+          currency: p.currency || 'CLP',
+          account,
+          idempotencyKey,
+        });
+
+        if (!out?.ok) {
+          const msg = (out as any)?.error || 'Error no especificado por el PSP';
+          await prisma.payout.update({
+            where: { id: p.id },
+            data: {
+              status: 'FAILED',
+              failureMessage: String(msg).slice(0, 250),
+            },
+          });
+          results.push({ payoutId: p.id, error: String(msg) });
+          continue;
+        }
+
+        // Éxito: guardamos pspPayoutId y avanzamos estado
+        const nextStatus = (out as any).status || 'IN_TRANSIT';
+        const paidAt =
+          nextStatus === 'PAID'
+            ? (out as any).paidAt
+              ? new Date((out as any).paidAt)
+              : now()
+            : null;
+
+        await prisma.payout.update({
+          where: { id: p.id },
+          data: {
+            status: nextStatus as any,
+            pspPayoutId: (out as any).pspPayoutId ?? p.pspPayoutId ?? null,
+            paidAt: paidAt,
+            failureCode: null,
+            failureMessage: null,
+          },
+        });
+
+        results.push({
+          payoutId: p.id,
+          status: String(nextStatus),
+          paidAt: paidAt ? paidAt.toISOString() : null,
+        });
+      } catch (e: any) {
+        const msg =
+          e?.response?.data?.error ||
+          e?.message ||
+          'Fallo inesperado ejecutando payout';
+        await prisma.payout.update({
+          where: { id: p.id },
+          data: {
+            status: 'FAILED',
+            failureMessage: String(msg).slice(0, 250),
+          },
+        });
+        results.push({ payoutId: p.id, error: String(msg) });
+      }
+    }
+
+    const processed = results.filter(
+      (r) =>
+        r.status === 'PAID' ||
+        r.status === 'IN_TRANSIT' ||
+        r.status === 'SCHEDULED'
+    ).length;
+
+    return res.status(200).json({ ok: true, processed, results });
+  } catch (err: any) {
+    console.error('adminRunPayoutsNow error:', err);
+    return res
+      .status(500)
+      .json({ error: err?.message || 'Error ejecutando pagos' });
+  }
+}
+
+/**
+ * POST /api/payments/payouts/webhook
+ * Webhook del PSP/adaptador para actualizar estado de un payout.
+ * Debe venir sin auth JWT (usa firma/HMAC del PSP si aplica).
+ */
+export async function payoutsWebhook(req: Request, res: Response) {
+  try {
+    const provider = getPayoutProvider();
+
+    // Verificación de firma (si el provider la implementa)
+    const maybeRawBody: Buffer =
+      (req as any)?.rawBody instanceof Buffer
+        ? (req as any).rawBody
+        : Buffer.from(JSON.stringify(req.body ?? {}), 'utf8');
+
+    if (provider.verifyWebhookSignature) {
+      const okSig = provider.verifyWebhookSignature(
+        maybeRawBody,
+        req.headers as Record<string, string | string[] | undefined>
+      );
+      if (!okSig) {
+        return res.status(401).json({ ok: false, error: 'invalid signature' });
+      }
+    }
+
+    // Si el provider no implementa parseWebhook, aceptamos sin acción
+    if (!provider.parseWebhook) {
+      return res.status(200).json({ ok: true, ignored: true });
+    }
+
+    const evt = await provider.parseWebhook(req.body);
+
+    // Buscamos el payout por id interno o por id externo
+    let payout = null;
+    if ((evt as any).payoutId) {
+      payout = await prisma.payout.findUnique({ where: { id: (evt as any).payoutId } });
+    } else if ((evt as any).externalId) {
+      payout = await prisma.payout.findFirst({
+        where: { pspPayoutId: String((evt as any).externalId) },
+      });
+    }
+
+    if (!payout) {
+      // Evitamos 4xx para que el PSP no reintente indefinidamente
+      return res.status(200).json({ ok: false, reason: 'payout not found' });
+    }
+
+    const data: any = {};
+    if ((evt as any).externalId) data.pspPayoutId = String((evt as any).externalId);
+
+    if ((evt as any).status) {
+      const s = String((evt as any).status).toUpperCase();
+      if (['PENDING', 'SCHEDULED', 'IN_TRANSIT', 'PAID', 'FAILED', 'CANCELED'].includes(s)) {
+        data.status = s;
+      }
+      if (s === 'PAID') {
+        data.paidAt = (evt as any).paidAt ? new Date((evt as any).paidAt) : now();
+        data.failureCode = null;
+        data.failureMessage = null;
+      }
+      if (s === 'FAILED') {
+        data.failureCode = (evt as any).failureCode ?? null;
+        data.failureMessage = (evt as any).failureMessage ?? 'Payout rechazado por PSP';
+      }
+    }
+
+    await prisma.payout.update({
+      where: { id: payout.id },
+      data,
+    });
+
+    return res.status(200).json({ ok: true });
+  } catch (err: any) {
+    console.error('payoutsWebhook error:', err);
+    return res
+      .status(200) // 200 para no provocar reintentos violentos
+      .json({ ok: false, error: err?.message || 'error' });
+  }
+}
+
+/* ============================================================
+   ✅ ÚNICA función adminApproveAndCapture (unificada)
+   - Si hay payment.pspPaymentId → captura/libera en PSP (split/escrow).
+   - Si no, usa Webpay (TBK) capture().
+   - Marca reserva como PAID y crea payout PENDING si corresponde.
+   ============================================================ */
+export async function adminApproveAndCapture(req: Request, res: Response) {
+  try {
+    const reservationId = Number(req.params.id);
+    if (!Number.isFinite(reservationId)) {
+      return res.status(400).json({ error: 'ID inválido' });
+    }
+
+    const adminId = (req as any)?.user?.id;
+
+    // Cargamos reserva + pago + evento (para ubicar organizador)
+    const r = await prisma.reservation.findUnique({
+      where: { id: reservationId },
+      include: {
+        payment: true,
+        event: { select: { organizerId: true, price: true } },
+      },
+    });
+    if (!r) return res.status(404).json({ error: 'Reserva no encontrada' });
+
+    // Debe estar TICKET_UPLOADED y debe existir el archivo
+    if (r.fulfillmentStatus !== 'TICKET_UPLOADED') {
+      return res
+        .status(409)
+        .json({ error: 'La reserva no está en estado TICKET_UPLOADED' });
+    }
+    if (!r.ticketFilePath || !fs.existsSync(path.resolve(r.ticketFilePath))) {
+      return res.status(409).json({ error: 'Archivo no encontrado en servidor' });
+    }
+
+    // Validaciones del pago pre-autorizado
+    const payment = r.payment;
+    if (!payment) return res.status(409).json({ error: 'La reserva no tiene pago asociado' });
+    if (payment.status !== 'AUTHORIZED') {
+      return res.status(400).json({ error: 'La transacción no está pre-autorizada' });
+    }
+    if (!payment.token || !payment.buyOrder || !payment.authorizationCode) {
+      return res
+        .status(400)
+        .json({ error: 'Faltan datos (token/buyOrder/authorizationCode)' });
+    }
+    if (payment.authorizationExpiresAt && payment.authorizationExpiresAt < new Date()) {
+      return res.status(400).json({ error: 'La autorización expiró; reintenta autorizar' });
+    }
+
+    const captureAmount = payment.amount;
+
+    // 1) Capturar en Webpay
+    const tx = tbkTx();
+    const cap = await tx.capture(
+      payment.token,
+      payment.buyOrder,
+      payment.authorizationCode,
+      captureAmount
+    );
+    if (!cap || cap.response_code !== 0) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Captura rechazada por el PSP',
+        responseCode: cap?.response_code ?? null,
+      });
+    }
+
+    // 2) Resolver cuenta conectada del organizador (si no estaba seteada en payment)
+    let destAccountId: number | null = payment.destinationAccountId ?? null;
+    if (!destAccountId && r.event?.organizerId) {
+      const acct = await prisma.connectedAccount.findUnique({
+        where: { userId: r.event.organizerId },
+      });
+      if (acct && acct.payoutsEnabled) destAccountId = acct.id;
+    }
+
+    // 3) Calcular neto (ajusta si tienes comisión)
+    const applicationFeeAmount = payment.applicationFeeAmount ?? 0;
+    const computedNet = Math.max(0, captureAmount - applicationFeeAmount);
+
+    // 4) Actualizaciones atómicas: payment CAPTURED + reserva PAID + crear payout PENDING (si hay cuenta)
+    const updated = await prisma.$transaction(async (txp) => {
+      const pay = await txp.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: 'CAPTURED',
+          capturedAmount: captureAmount,
+          capturedAt: new Date(),
+          captureId: String(cap?.authorization_code ?? '') || null, // TBK retorna authorization_code en capture
+          destinationAccountId: destAccountId ?? payment.destinationAccountId ?? null,
+          netAmount: payment.netAmount ?? computedNet,
+        },
+      });
+
+      const resv = await txp.reservation.update({
+        where: { id: r.id },
+        data: {
+          status: 'PAID',
+          paidAt: new Date(),
+          fulfillmentStatus: 'TICKET_APPROVED',
+          approvedAt: new Date(),
+          approvedByAdminId: adminId ?? null,
+          rejectionReason: null,
+        },
+      });
+
+      let payout = null as null | { id: number; amount: number; currency: string; accountId: number };
+      if (destAccountId) {
+        const netAmountForPayout = pay.netAmount ?? computedNet;
+        const created = await txp.payout.create({
+          data: {
+            accountId: destAccountId,
+            reservationId: resv.id,
+            paymentId: pay.id,
+            amount: netAmountForPayout,
+            status: 'PENDING',
+            currency: 'CLP',
+            source: 'INTERNAL',
+            idempotencyKey: newIdempotencyKey(), // <-- requerido por schema
+          },
+          select: { id: true, amount: true, currency: true, accountId: true },
+        });
+        payout = created;
+      }
+
+      return { pay, resv, payout };
+    });
+
+    // 5) Disparo en caliente del payout (si existe)
+    let payoutExec: any = null;
+    if (updated.payout) {
+      // Obtener datos bancarios del destinatario
+      const account = await prisma.connectedAccount.findUnique({
+        where: { id: updated.payout.accountId },
+        select: {
+          payoutsEnabled: true,
+          payoutBankName: true,
+          payoutAccountType: true,
+          payoutAccountNumber: true,
+          payoutHolderName: true,
+          payoutHolderRut: true,
+        },
+      });
+
+      const isAccountReady =
+        !!account?.payoutsEnabled &&
+        !!account?.payoutBankName &&
+        !!account?.payoutAccountType &&
+        !!account?.payoutAccountNumber &&
+        !!account?.payoutHolderName &&
+        !!account?.payoutHolderRut;
+
+      if (!isAccountReady) {
+        await prisma.payout.update({
+          where: { id: updated.payout.id },
+          data: {
+            status: 'FAILED',
+            failureMessage: 'Datos bancarios incompletos o payouts deshabilitados',
+          },
+        });
+        payoutExec = { ok: false, error: 'Datos bancarios incompletos o payouts deshabilitados' };
+      } else {
+        const provider = getPayoutProvider();
+        const idempotencyKey = `payout-${updated.payout.id}`;
+
+        const out = await provider.pay({
+          payoutId: updated.payout.id,
+          amount: updated.payout.amount,
+          currency: updated.payout.currency || 'CLP',
+          account: {
+            bankName: account.payoutBankName!,
+            accountType: account.payoutAccountType as any,
+            accountNumber: account.payoutAccountNumber!,
+            holderName: account.payoutHolderName!,
+            holderRut: account.payoutHolderRut!,
+          },
+          idempotencyKey,
+        });
+
+        // Persistir resultado
+        if (!out.ok) {
+          await prisma.payout.update({
+            where: { id: updated.payout.id },
+            data: {
+              status: 'FAILED',
+              failureMessage: String(out.error ?? 'Error no especificado por el PSP').slice(0, 250),
+            },
+          });
+        } else {
+          const nextStatus = (out.status as any) || 'IN_TRANSIT';
+          await prisma.payout.update({
+            where: { id: updated.payout.id },
+            data: {
+              status: nextStatus,
+              pspPayoutId: out.pspPayoutId ?? undefined,
+              paidAt:
+                nextStatus === 'PAID'
+                  ? out.paidAt
+                    ? new Date(out.paidAt)
+                    : new Date()
+                  : null,
+              failureCode: null,
+              failureMessage: null,
+            },
+          });
+        }
+
+        payoutExec = out;
+      }
+    }
+
+    return res.status(200).json({
+      ok: true,
+      capturedAmount: payment.amount,
+      paymentId: updated.pay.id,
+      reservationId: updated.resv.id,
+      payout: updated.payout
+        ? { id: updated.payout.id, exec: payoutExec }
+        : null,
+    });
+  } catch (err: any) {
+    console.error('adminApproveAndCapture error:', err);
+    return res.status(500).json({ error: err?.message || 'Error aprobando y capturando' });
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

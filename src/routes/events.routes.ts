@@ -1,4 +1,3 @@
-// src/routes/events.routes.ts
 import { Router } from 'express';
 import {
   authenticateToken,
@@ -11,23 +10,42 @@ import {
   approveEvent,
   listPublicEvents,
   listOrganizerEvents,
-  listPendingEvents,
   getEventDetails,
   updateEvent,
   deleteEvent,
   purchaseTickets,
+  listPendingEvents,
 } from '../controllers/events.controller';
 
 const router = Router();
 
 /**
- * Rutas públicas (primero, para no colisionar)
+ * Rutas públicas (primero, para no colisionar con `/:id`)
  */
-router.get('/public-events', listPublicEvents);
+router.get('/public', listPublicEvents);        // alias nuevo
+router.get('/public-events', listPublicEvents); // compatibilidad
+
+/**
+ * Rutas de administración dentro de este router
+ * (si las necesitas aquí). También van ANTES de `/:id`.
+ * Nota: si ya las montas bajo /api/admin/events, puedes
+ * quitar estas para evitar duplicados.
+ */
+router.get(
+  '/pending-events',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  listPendingEvents
+);
+router.patch(
+  '/:id/approve',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  approveEvent
+);
 
 /**
  * Compra de entradas (usuario autenticado)
- * — sin regex en el path, validamos el ID en el controller
  * — va ANTES de '/:id'
  */
 router.post('/:id/purchase', authenticateToken, ensureActiveAccount, purchaseTickets);
@@ -44,50 +62,20 @@ router.get(
 );
 
 /**
- * Detalle público por id (simple)
- * — esta ruta va DESPUÉS de las específicas de arriba
+ * Detalle público por id
+ * — debe quedar al final de las GET específicas
  */
 router.get('/:id', getEventDetails);
 
 /**
- * Crear/editar/eliminar eventos (organizador verificado o superadmin)
+ * Crear/editar/eliminar (organizador verificado)
  */
 router.post('/', authenticateToken, requireVerifiedOrganizer, createEvent);
-
-router.put(
-  '/:id',
-  authenticateToken,
-  requireVerifiedOrganizer,
-  updateEvent
-);
-
-router.delete(
-  '/:id',
-  authenticateToken,
-  requireVerifiedOrganizer,
-  deleteEvent
-);
-
-/**
- * Rutas de administración (solo superadmin)
- * — Declararlas ANTES de '/:id' público si las montaras en el mismo router
- *   (en este caso van bajo /api/admin/events, así que no colisionan)
- */
-router.get(
-  '/pending-events',
-  authenticateToken,
-  authorizeRoles('superadmin'),
-  listPendingEvents
-);
-
-router.patch(
-  '/:id/approve',
-  authenticateToken,
-  authorizeRoles('superadmin'),
-  approveEvent
-);
+router.put('/:id', authenticateToken, requireVerifiedOrganizer, updateEvent);
+router.delete('/:id', authenticateToken, requireVerifiedOrganizer, deleteEvent);
 
 export default router;
+
 
 
 

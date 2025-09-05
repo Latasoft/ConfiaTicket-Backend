@@ -29,7 +29,6 @@ export async function adminListOrganizerApplications(req: Request, res: Response
           OR: [
             { legalName: { contains: q, mode: "insensitive" } },
             { taxId: { contains: q, mode: "insensitive" } },
-            // 👇 filtro relacional correcto
             { user: { is: { name: { contains: q, mode: "insensitive" } } } },
             { user: { is: { email: { contains: q, mode: "insensitive" } } } },
           ],
@@ -53,10 +52,8 @@ export async function adminListOrganizerApplications(req: Request, res: Response
         idCardImage: true,
         status: true,
         createdAt: true,
-        updatedAt: true, // 👈 agregado
-        user: {
-          select: { id: true, name: true, email: true },
-        },
+        updatedAt: true,
+        user: { select: { id: true, name: true, email: true } },
       },
     }),
     prisma.organizerApplication.count({ where }),
@@ -73,7 +70,7 @@ export async function adminListOrganizerApplications(req: Request, res: Response
       idCardImage: a.idCardImage,
       status: a.status as AppStatus,
       createdAt: a.createdAt,
-      updatedAt: a.updatedAt, // 👈 agregado
+      updatedAt: a.updatedAt,
       user: a.user ? { id: a.user.id, name: a.user.name, email: a.user.email } : null,
     })),
     total,
@@ -85,7 +82,8 @@ export async function adminListOrganizerApplications(req: Request, res: Response
 /**
  * POST /api/admin/organizer-applications/:id/approve
  * - Marca la solicitud como APPROVED
- * - Actualiza al usuario a role=organizer, isVerified=true, canSell=true
+ * - Actualiza al usuario:
+ *   role='organizer', isActive=true, isVerified=true, canSell=true
  */
 export async function adminApproveOrganizerApplication(req: Request, res: Response) {
   const id = Number(req.params.id);
@@ -111,14 +109,16 @@ export async function adminApproveOrganizerApplication(req: Request, res: Respon
       where: { id: app.userId },
       data: {
         role: "organizer",
-        isVerified: true,
-        canSell: true,
+        isActive: true,     // ✅ activamos la cuenta por seguridad
+        isVerified: true,   // ✅ KYC verificado
+        canSell: true,      // ✅ puede vender (si prefieres manual, cambia a false)
       },
       select: {
         id: true,
         name: true,
         email: true,
         role: true,
+        isActive: true,
         isVerified: true,
         canSell: true,
       },
@@ -166,7 +166,7 @@ export async function adminRejectOrganizerApplication(req: Request, res: Respons
       data: {
         isVerified: false,
         canSell: false,
-        // role: "buyer", // <- Descomenta si quieres forzar volver a buyer
+        // role: "buyer", // <- Si quieres forzar el rol de vuelta a buyer, descomenta.
       },
       select: {
         id: true,
@@ -217,7 +217,7 @@ export async function adminReopenOrganizerApplication(req: Request, res: Respons
       data: {
         isVerified: false,
         canSell: false,
-        // role: "buyer", // <- opcional: si quieres revertir el rol mientras está pendiente
+        // role: "buyer", // <- opcional: revertir rol mientras está pendiente
       },
       select: {
         id: true,
@@ -237,6 +237,7 @@ export async function adminReopenOrganizerApplication(req: Request, res: Respons
     user: updatedUser,
   });
 }
+
 
 
 

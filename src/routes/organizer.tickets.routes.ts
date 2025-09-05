@@ -4,7 +4,10 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { Router } from "express";
-import { authenticateToken, requireVerifiedOrganizer } from "../middleware/authMiddleware";
+import {
+  authenticateToken,
+  requireVerifiedOrganizer,
+} from "../middleware/authMiddleware";
 import {
   organizerUploadTicket,
   organizerListReservations,
@@ -70,6 +73,7 @@ router.post(
 );
 
 export default router;
+
 
 
 

@@ -1,97 +1,57 @@
-// prisma/seed.js
-const { PrismaClient } = require('@prisma/client');
-const bcrypt = require('bcrypt');
+// prisma/seed.ts
+import 'dotenv/config';
+import { PrismaClient } from '@prisma/client';
+import bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
 
-// Igual que en el backend: "XXXXXXXX-D"
-function normalizeRut(input) {
-  const raw = String(input || '').replace(/\./g, '').replace(/-/g, '').toUpperCase();
-  const m = raw.match(/^(\d{7,8})([0-9K])$/);
-  if (!m) return '';
-  return `${m[1]}-${m[2]}`;
-}
+async function main() {
+  const email = process.env.BOOTSTRAP_ADMIN_EMAIL?.trim();
+  const plain = process.env.BOOTSTRAP_ADMIN_PASSWORD;
 
-async function upsertUser(params) {
-  const {
-    name,
-    email,
-    password,              // plano; acá lo hasheamos
-    role,                  // 'superadmin' | 'organizer' | 'buyer'
-    rut = null,
-    canSell = true,
-    isVerified = false,
-  } = params;
+  if (!email || !plain) {
+    throw new Error(
+      'Faltan BOOTSTRAP_ADMIN_EMAIL y/o BOOTSTRAP_ADMIN_PASSWORD en las envs.'
+    );
+  }
 
-  const hash = await bcrypt.hash(password, 10);
-  const normRut = rut ? normalizeRut(rut) : null;
+  const passwordHash = await bcrypt.hash(plain, 12);
 
-  const user = await prisma.user.upsert({
-    where: { email: email.toLowerCase() },
+  // upsert idempotente por email
+  const admin = await prisma.user.upsert({
+    where: { email },
     update: {
-      name,
-      role,
-      rut: normRut,
-      canSell,
-      isVerified,
+      role: 'superadmin',
       isActive: true,
-      password: hash,
+      deletedAt: null,
+      password: passwordHash,
+      // tokenVersion opcional (mantener o resetear)
+      // tokenVersion: 0,
     },
     create: {
-      name,
-      email: email.toLowerCase(),
-      password: hash,
-      role,
-      rut: normRut,
-      canSell,
-      isVerified,
+      email,
+      name: 'Super Admin',
+      role: 'superadmin',
       isActive: true,
+      password: passwordHash,
+      // completa otros campos requeridos por tu schema si los tienes
     },
-    select: { id: true, email: true, role: true, rut: true },
+    select: { id: true, email: true, role: true, isActive: true, createdAt: true },
   });
 
-  console.log('Seeded:', user);
-}
-
-async function main() {
-  // SUPERADMIN
-  await upsertUser({
-    name: 'Admin Principal',
-    email: 'admin@local.test',
-    password: 'SuperFuerte#2025',
-    role: 'superadmin',
-    rut: null,          // opcional
-    canSell: true,
-    isVerified: true,
-  });
-
-  // (Opcionales) usuarios de prueba
-  await upsertUser({
-    name: 'Organizador Verificado',
-    email: 'organizer@example.com',
-    password: 'Org#2025Seguro',
-    role: 'organizer',
-    rut: '12345678-5',
-    canSell: true,
-    isVerified: true,
-  });
-
-  await upsertUser({
-    name: 'Buyer Uno',
-    email: 'buyer@example.com',
-    password: 'Buyer#2025Seguro',
-    role: 'buyer',
-    rut: '98765432-K',
-  });
+  console.log('✅ Superadmin listo:', admin);
+  console.log('   Email:', admin.email);
 }
 
 main()
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  })
-  .finally(async () => {
+  .then(async () => {
     await prisma.$disconnect();
+    process.exit(0);
+  })
+  .catch(async (e) => {
+    console.error('❌ Seed error:', e?.message || e);
+    await prisma.$disconnect();
+    process.exit(1);
   });
 
 

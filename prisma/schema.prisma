@@ -8,39 +8,45 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/* ======================= USUARIOS ======================= */
+
 model User {
-  id           Int       @id @default(autoincrement())
-  name         String    @db.VarChar(100)
-  email        String    @unique @db.VarChar(254)
-  password     String    @db.VarChar(100)
-  role         String    @db.VarChar(16)
-  rut          String?   @unique @db.VarChar(16)
-  canSell      Boolean   @default(true)
-  isVerified   Boolean   @default(false)
-  isActive     Boolean   @default(true)
-  deletedAt    DateTime?
-  anonymizedAt DateTime?
-  documentUrl  String?   @db.VarChar(1024)
+  id                   Int       @id @default(autoincrement())
+  name                 String    @db.VarChar(100)
+  email                String    @unique @db.VarChar(254)
+  password             String    @db.VarChar(100)
+  role                 String    @db.VarChar(16)
+  rut                  String?   @unique @db.VarChar(16)
+  birthDate            DateTime? @db.Date                  // fecha de nacimiento
+  canSell              Boolean   @default(true)
+  isVerified           Boolean   @default(false)
+  isActive             Boolean   @default(true)
+  deletedAt            DateTime?
+  anonymizedAt         DateTime?
+  documentUrl          String?   @db.VarChar(1024)
   resetPasswordToken   String?   @db.VarChar(255)
   resetPasswordExpires DateTime?
-  tokenVersion Int       @default(0)
-  failedLoginCount Int      @default(0)
-  lockUntil        DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt @default(now())
+  tokenVersion         Int       @default(0)
+  failedLoginCount     Int       @default(0)
+  lockUntil            DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt @default(now())
 
-  events        Event[]       @relation("OrganizerEvents")
-  reservations  Reservation[] @relation("ReservationBuyer")
+  events               Event[]       @relation("OrganizerEvents")
+  reservations         Reservation[] @relation("ReservationBuyer")
 
-  application   OrganizerApplication?
+  application          OrganizerApplication?
 
   // Reventa
-  resaleListings      ResaleListing[]
-  resaleOrdersBought  ResaleOrder[]   @relation("ResaleOrderBuyer")
-  ticketAssets        TicketAsset[]   @relation("TicketAssetUploader")
+  resaleListings       ResaleListing[]
+  resaleOrdersBought   ResaleOrder[]   @relation("ResaleOrderBuyer")
+  ticketAssets         TicketAsset[]   @relation("TicketAssetUploader")
 
   // Aprobaciones de tickets como superadmin (lado inverso)
-  reservationsApproved  Reservation[] @relation("ReservationApprovedBy")
+  reservationsApproved Reservation[] @relation("ReservationApprovedBy")
+
+  // Marketplace / PSP
+  connectedAccount     ConnectedAccount?
 
   @@index([role, isVerified])
   @@index([isActive])
@@ -49,12 +55,16 @@ model User {
   @@index([failedLoginCount])
 }
 
+/* ======================= EVENTOS ======================= */
+
 model Event {
   id            Int       @id @default(autoincrement())
   title         String    @db.VarChar(120)
   description   String    @db.VarChar(4000)
   date          DateTime
-  location      String    @db.VarChar(120)
+  location      String    @db.VarChar(120)   // Lugar / recinto
+  city          String?   @db.VarChar(120)   // 👈 NUEVO
+  commune       String?   @db.VarChar(120)   // 👈 NUEVO
   capacity      Int
   price         Int       @default(0)
   approved      Boolean   @default(false)
@@ -68,6 +78,7 @@ model Event {
 
   reservations  Reservation[]
 
+  // (LEGADO) Datos bancarios por evento — se recomienda moverlos al perfil/PSP del organizador
   payoutBankName      String? @db.VarChar(80)
   payoutAccountType   String? @db.VarChar(16)
   payoutAccountNumber String? @db.VarChar(30)
@@ -80,7 +91,11 @@ model Event {
   @@index([organizerId])
   @@index([approved])
   @@index([date])
+  @@index([city])
+  @@index([commune])
 }
+
+/* ============ RESERVAS (COMPRA PRIMARIA) ============ */
 
 enum ReservationStatus {
   PENDING_PAYMENT
@@ -89,7 +104,7 @@ enum ReservationStatus {
   EXPIRED
 }
 
-/* ====== Cadena de custodia de ticket (escrow de entrega) ====== */
+/* Cadena de custodia de ticket (escrow) */
 enum FulfillmentStatus {
   WAITING_TICKET
   TICKET_UPLOADED
@@ -98,7 +113,7 @@ enum FulfillmentStatus {
   DELIVERED
 }
 
-/* ====== NUEVO: estado de reembolso para reservas vencidas ====== */
+/* Reembolso para reservas vencidas */
 enum RefundStatus {
   NONE
   REQUESTED
@@ -126,7 +141,7 @@ model Reservation {
   // 1–1 con Payment (Payment.reservationId es el FK)
   payment   Payment?
 
-  // ==== Flujo de ticket ====
+  // Flujo de ticket
   fulfillmentStatus  FulfillmentStatus @default(WAITING_TICKET)
   ticketFilePath     String?           @db.VarChar(1024)
   ticketFileName     String?           @db.VarChar(255)
@@ -140,21 +155,29 @@ model Reservation {
   approvedByAdminId  Int?
   approvedByAdmin    User?             @relation("ReservationApprovedBy", fields: [approvedByAdminId], references: [id])
 
-  // ==== NUEVO: plazo para subir ticket + tracking de reembolso por vencimiento ====
+  // Plazo para subir ticket + tracking de reembolso
   ticketUploadDeadlineAt DateTime?
   refundStatus           RefundStatus   @default(NONE)
   refundedAt             DateTime?
   refundId               String?        @db.VarChar(100)
   refundReason           String?        @db.VarChar(255)
 
+  // Payouts que referencian esta reserva (opcional)
+  payouts Payout[]
+
+  // 🔽 Inversa libro mayor
+  ledgerEntries LedgerEntry[] @relation("ReservationLedger")
+
   @@index([eventId])
   @@index([buyerId])
   @@index([eventId, status, expiresAt])
   @@index([fulfillmentStatus])
   @@index([approvedByAdminId])
-  @@index([status, ticketUploadDeadlineAt])  // útil para el barrido
+  @@index([status, ticketUploadDeadlineAt])
   @@index([refundStatus])
 }
+
+/* ============ SOLICITUD ORGANIZADOR ============ */
 
 enum ApplicationStatus {
   PENDING
@@ -179,16 +202,136 @@ model OrganizerApplication {
   @@index([status])
 }
 
-// ====== Pagos Webpay / Transbank ======
+/* =================== PSP / Marketplace =================== */
 
 enum PaymentStatus {
   INITIATED
+  AUTHORIZED
+  CAPTURED
   COMMITTED
+  VOIDED
   FAILED
   ABORTED
   TIMEOUT
   REFUNDED
 }
+
+enum ConnectedOnboardingStatus {
+  PENDING
+  REQUIRED
+  COMPLETE
+  RESTRICTED
+}
+
+// Tipo de cuenta “Cuenta de cobro”
+enum AccountType {
+  VISTA
+  CORRIENTE
+  AHORRO
+  RUT
+}
+
+/* NEW: Política de captura (para aprobar antes de capturar) */
+enum CapturePolicy {
+  IMMEDIATE
+  MANUAL_ON_APPROVAL
+}
+
+/* NEW: Estado de escrow/liberación del PSP */
+enum PaymentEscrowStatus {
+  NONE
+  HELD
+  RELEASED
+  RELEASE_FAILED
+  EXPIRED
+}
+
+model ConnectedAccount {
+  id               Int                        @id @default(autoincrement())
+  userId           Int                        @unique
+  psp              String                     @db.VarChar(32)     // "WEBPAY" | "STRIPE" | "MP" | "KUSHKI" ...
+  pspAccountId     String                     @unique @db.VarChar(128)
+  onboardingStatus ConnectedOnboardingStatus  @default(PENDING)
+  payoutsEnabled   Boolean                    @default(false)
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+
+  // Datos de cuenta de cobro (si el PSP requiere datos bancarios del destinatario)
+  payoutBankName      String?     @db.VarChar(80)
+  payoutAccountType   AccountType?
+  payoutAccountNumber String?     @db.VarChar(30)
+  payoutHolderName    String?     @db.VarChar(100)
+  payoutHolderRut     String?     @db.VarChar(16)
+
+  user                User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  payouts             Payout[]
+  destinationPayments Payment[]                  @relation("DestinationAccount")
+
+  // 🔽 Inversa libro mayor por cuenta
+  ledgerEntries       LedgerEntry[]
+
+  @@index([psp, pspAccountId])
+}
+
+enum PayoutStatus {
+  PENDING
+  SCHEDULED
+  IN_TRANSIT
+  PAID
+  FAILED
+  CANCELED
+}
+
+/* NEW: Fuente del payout (nuestro sistema vs iniciado por PSP) */
+enum PayoutSource {
+  INTERNAL
+  PSP
+}
+
+model Payout {
+  id               Int              @id @default(autoincrement())
+  accountId        Int
+  paymentId        Int?
+  reservationId    Int?
+  amount           Int
+  currency         String           @default("CLP")
+  status           PayoutStatus     @default(PENDING)
+
+  // Identificadores / idempotencia
+  pspPayoutId      String?          @unique @db.VarChar(128)
+  idempotencyKey   String           @unique @db.VarChar(80)
+  externalStatus   String?          @db.VarChar(64)
+
+  // Scheduling / timestamps
+  scheduledFor     DateTime?
+  paidAt           DateTime?
+
+  // Errores y reintentos
+  retries          Int              @default(0)
+  failureCode      String?          @db.VarChar(50)
+  failureMessage   String?          @db.VarChar(255)
+
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  // Quién ejecuta el payout (split del PSP vs interno)
+  source           PayoutSource     @default(INTERNAL)
+
+  account          ConnectedAccount @relation(fields: [accountId], references: [id])
+  payment          Payment?         @relation(fields: [paymentId], references: [id])
+  reservation      Reservation?     @relation(fields: [reservationId], references: [id])
+
+  // Libro mayor
+  ledgerEntries    LedgerEntry[]    @relation("PayoutLedger")
+
+  @@unique([reservationId])
+  @@index([accountId])
+  @@index([status, updatedAt])
+  @@index([paymentId])
+  @@index([source])
+}
+
+/* =================== PAGOS =================== */
 
 model Payment {
   id             Int            @id @default(autoincrement())
@@ -205,17 +348,48 @@ model Payment {
   buyOrder       String         @unique @db.VarChar(100)
   sessionId      String         @db.VarChar(100)
   amount         Int
+  currency       String         @default("CLP")
   status         PaymentStatus  @default(INITIATED)
 
-  // Metadatos TBK
-  authorizationCode String?     @db.VarChar(20)
-  paymentTypeCode   String?     @db.VarChar(10)
-  installmentsNumber Int?
-  responseCode      Int?
-  accountingDate    String?     @db.VarChar(8) // "MMDD"
-  transactionDate   DateTime?
-  cardLast4         String?     @db.VarChar(4)
-  vci               String?     @db.VarChar(32)
+  // Marketplace (split)
+  destinationAccountId Int?
+  applicationFeeAmount Int?
+  netAmount            Int?
+  isSplit              Boolean       @default(false)
+
+  // Metadatos PSP genéricos
+  psp               String?       @db.VarChar(32)
+  pspPaymentId      String?       @db.VarChar(128)
+  pspChargeId       String?       @db.VarChar(128)
+  pspMetadata       Json?
+
+  // Metadatos TBK / tarjeta (si aplica)
+  authorizationCode   String?   @db.VarChar(20)
+  paymentTypeCode     String?   @db.VarChar(10)
+  installmentsNumber  Int?
+  responseCode        Int?
+  accountingDate      String?   @db.VarChar(8)  // "MMDD"
+  transactionDate     DateTime?
+  cardLast4           String?   @db.VarChar(4)
+  vci                 String?   @db.VarChar(32)
+
+  // Deferred capture (autorización y captura)
+  isDeferredCapture      Boolean        @default(false)
+  authorizedAmount       Int?
+  authorizationExpiresAt DateTime?
+  capturedAmount         Int?
+  capturedAt             DateTime?
+  captureId              String?        @db.VarChar(100)
+
+  // NEW: política de captura y estado de escrow/liberación
+  capturePolicy    CapturePolicy       @default(IMMEDIATE)
+  escrowStatus     PaymentEscrowStatus @default(NONE)
+  escrowHoldId     String?             @db.VarChar(128)
+  escrowExpiresAt  DateTime?
+  escrowReleasedAt DateTime?
+  escrowReleaseId  String?             @db.VarChar(128)
+
+  voidedAt            DateTime?
 
   // Auditoría
   commerceCode    String?       @db.VarChar(20)
@@ -228,12 +402,53 @@ model Payment {
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt @default(now())
 
+  destinationAccount ConnectedAccount? @relation("DestinationAccount", fields: [destinationAccountId], references: [id])
+  payouts            Payout[]
+
+  // 🔽 Inversa libro mayor
+  ledgerEntries      LedgerEntry[] @relation("PaymentLedger")
+
   @@index([status])
   @@index([token])
   @@index([buyOrder])
+  @@index([destinationAccountId])
+  @@index([psp])
+  @@index([pspPaymentId])
+  @@index([escrowStatus])
+  @@index([capturePolicy])
 }
 
-/* ====== Reventa (escrow) ====== */
+/* =================== LIBRO MAYOR =================== */
+
+model LedgerEntry {
+  id            Int       @id @default(autoincrement())
+  accountId     Int
+  type          String    @db.VarChar(32)   // SALE | FEE | REFUND | HOLD_RELEASE | PAYOUT | ADJUSTMENT...
+  direction     String    @db.VarChar(8)    // DEBIT | CREDIT
+  amount        Int
+  currency      String    @default("CLP")
+  memo          String?   @db.VarChar(255)
+  createdAt     DateTime  @default(now())
+
+  // FKs opcionales para trazar el origen
+  paymentId     Int?
+  reservationId Int?
+  payoutId      Int?
+
+  // Relaciones (con nombres para evitar ambigüedad)
+  payment       Payment?      @relation("PaymentLedger",     fields: [paymentId],     references: [id])
+  reservation   Reservation?  @relation("ReservationLedger", fields: [reservationId], references: [id])
+  payout        Payout?       @relation("PayoutLedger",      fields: [payoutId],      references: [id])
+
+  account       ConnectedAccount @relation(fields: [accountId], references: [id])
+
+  @@index([accountId])
+  @@index([paymentId])
+  @@index([reservationId])
+  @@index([payoutId])
+}
+
+/* =================== REVENTA (ESCROW) =================== */
 
 enum ResaleListingStatus {
   ACTIVE
@@ -336,6 +551,15 @@ model EscrowTimeline {
 
   @@index([orderId])
 }
+
+
+
+
+
+
+
+
+
 
 
 

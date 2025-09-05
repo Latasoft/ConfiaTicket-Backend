@@ -1,4 +1,3 @@
-// src/controllers/events.controller.ts
 import { Request, Response } from 'express';
 import prisma from '../prisma/client';
 
@@ -19,10 +18,20 @@ function cutoffLabel(min: number): string {
   return `${min} minuto${min > 1 ? 's' : ''}`;
 }
 
+/* ======== Ventana de HOLD para bloquear stock (por defecto 15 min) ======== */
+const HOLD_MINUTES = Number(process.env.HOLD_MINUTES ?? process.env.BOOKING_HOLD_MINUTES ?? 15);
+const HOLD_MS = HOLD_MINUTES * 60_000;
+
 /* ================= Helpers de parseo ================= */
 function parseIntSafe(val: unknown, def: number): number {
   const n = Number(val);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : def;
+}
+function parseBool(val: unknown, def = false): boolean {
+  const v = String(val ?? '').trim().toLowerCase();
+  if (v === 'true' || v === '1' || v === 'yes') return true;
+  if (v === 'false' || v === '0' || v === 'no') return false;
+  return def;
 }
 
 const ALLOWED_ORDER_FIELDS = new Set([
@@ -87,8 +96,8 @@ export async function createEvent(req: Request, res: Response) {
       return res.status(400).json({ error: 'Fecha inválida (use ISO 8601 o formato válido)' });
     }
 
-    let organizerId = auth.id;
-    if (auth.role === 'superadmin') {
+    let organizerId = auth?.id ?? 0;
+    if (auth?.role === 'superadmin') {
       const oId = Number(bodyOrganizerId);
       if (!Number.isInteger(oId) || oId <= 0) {
         return res.status(400).json({ error: 'Para superadmin, organizerId es requerido y debe ser numérico' });
@@ -161,28 +170,110 @@ export async function listPublicEvents(req: Request, res: Response) {
     const orderBy = parseOrderBy(req.query.orderBy);
     const orderDir = parseOrderDir(req.query.orderDir);
 
+    const includePast =
+      parseBool(req.query.includePast, false) ||
+      parseBool((req.query as any).showPast, false);
+    const includeSoldOut = parseBool(req.query.includeSoldOut, false);
+
     const q = (req.query.q as string | undefined)?.trim();
     const location = (req.query.location as string | undefined)?.trim();
     const dateFrom = req.query.dateFrom as string | undefined;
     const dateTo = req.query.dateTo as string | undefined;
 
-    const where: any = { approved: true };
+    const now = new Date();
 
+    const whereCommon: any = { approved: true };
     if (q) {
-      const contains = { contains: q };
-      where.OR = [
-        { title: contains },
-        { description: contains },
-        { location: contains },
-      ];
+      const contains: any = { contains: q };
+      whereCommon.OR = [{ title: contains }, { description: contains }, { location: contains }];
+    }
+    if (location) {
+      whereCommon.location = { contains: location } as any;
     }
 
-    if (location) {
-      where.location = { contains: location };
+    /* ===== Caso combinado: includePast && includeSoldOut ===== */
+    if (includePast && includeSoldOut) {
+      const pastWhere = { ...whereCommon, date: { lt: now } };
+      const futureWhere = { ...whereCommon, date: { gte: now } };
+      const BASE_CAP = Math.min(Math.max(limit * 10, 100), 1000);
+
+      const [pastList, futureList] = await Promise.all([
+        prisma.event.findMany({
+          where: pastWhere,
+          orderBy: { [orderBy]: orderDir },
+          take: BASE_CAP,
+          select: {
+            id: true, title: true, description: true, date: true, location: true,
+            capacity: true, price: true, organizerId: true, approved: true,
+            createdAt: true, coverImageUrl: true,
+          },
+        }),
+        prisma.event.findMany({
+          where: futureWhere,
+          orderBy: { [orderBy]: orderDir },
+          take: BASE_CAP,
+          select: {
+            id: true, title: true, description: true, date: true, location: true,
+            capacity: true, price: true, organizerId: true, approved: true,
+            createdAt: true, coverImageUrl: true,
+          },
+        }),
+      ]);
+
+      let futureSoldOut: typeof futureList = [];
+      if (futureList.length) {
+        const ids = futureList.map(e => e.id);
+
+        const agg = await prisma.reservation.groupBy({
+          by: ['eventId'],
+          _sum: { quantity: true },
+          where: {
+            eventId: { in: ids },
+            OR: [
+              { status: 'PAID' as any },
+              {
+                status: 'PENDING_PAYMENT' as any,
+                expiresAt: { gt: now },
+                createdAt: { gt: new Date(now.getTime() - HOLD_MS) },
+              },
+            ],
+          },
+        });
+        const soldMap = new Map<number, number>(agg.map(g => [g.eventId as number, g._sum.quantity ?? 0]));
+
+        futureSoldOut = futureList.filter(ev => {
+          const sold = soldMap.get(ev.id) ?? 0;
+          const remaining = Math.max(0, ev.capacity - sold);
+          const salesClosed = now >= getSalesCloseAt(ev.date as Date);
+          return remaining <= 0 || salesClosed;
+        });
+      }
+
+      const merged = [...pastList, ...futureSoldOut];
+      merged.sort((a: any, b: any) => {
+        const va = a[orderBy], vb = b[orderBy];
+        let cmp = 0;
+        if (orderBy === 'title' || orderBy === 'location') {
+          cmp = String(va ?? '').localeCompare(String(vb ?? ''), 'es');
+        } else if (orderBy === 'date' || orderBy === 'createdAt') {
+          cmp = new Date(va).getTime() - new Date(vb).getTime();
+        } else {
+          cmp = Number(va ?? 0) - Number(vb ?? 0);
+        }
+        return orderDir === 'desc' ? -cmp : cmp;
+      });
+
+      const total = merged.length;
+      const start = (page - 1) * limit;
+      const events = merged.slice(start, start + limit);
+      return res.json({ page, limit, total, pages: Math.ceil(total / limit), events });
     }
+    /* =================== FIN caso combinado =================== */
+
+    const where: any = { ...whereCommon };
 
     if (dateFrom || dateTo) {
-      where.date = {};
+      where.date = where.date || {};
       if (dateFrom) {
         const d = new Date(dateFrom);
         if (!Number.isNaN(d.getTime())) where.date.gte = d;
@@ -192,37 +283,58 @@ export async function listPublicEvents(req: Request, res: Response) {
         if (!Number.isNaN(d.getTime())) where.date.lte = d;
       }
     }
+    if (!includePast) {
+      where.date = where.date || {};
+      where.date.gte = now;
+    }
 
-    const [events, total] = await Promise.all([
-      prisma.event.findMany({
-        where,
-        skip: (page - 1) * limit,
-        take: limit,
-        orderBy: { [orderBy]: orderDir },
-        select: {
-          id: true,
-          title: true,
-          description: true,
-          date: true,
-          location: true,
-          capacity: true,
-          price: true,
-          organizerId: true,
-          approved: true,
-          createdAt: true,
-          coverImageUrl: true,
-        },
-      }),
-      prisma.event.count({ where }),
-    ]);
-
-    return res.json({
-      page,
-      limit,
-      total,
-      pages: Math.ceil(total / limit),
-      events,
+    const BASE_CAP = Math.min(Math.max(limit * 10, 100), 1000);
+    const baseList = await prisma.event.findMany({
+      where,
+      orderBy: { [orderBy]: orderDir },
+      take: BASE_CAP,
+      select: {
+        id: true, title: true, description: true, date: true, location: true,
+        capacity: true, price: true, organizerId: true, approved: true,
+        createdAt: true, coverImageUrl: true,
+      },
     });
+
+    if (includeSoldOut) {
+      const total = baseList.length;
+      const start = (page - 1) * limit;
+      const events = baseList.slice(start, start + limit);
+      return res.json({ page, limit, total, pages: Math.ceil(total / limit), events });
+    }
+
+    const ids = baseList.map(e => e.id);
+    let filtered = baseList;
+
+    if (ids.length) {
+      const paidGroups = await prisma.reservation.groupBy({
+        by: ['eventId'],
+        _sum: { quantity: true },
+        where: {
+          eventId: { in: ids },
+          status: 'PAID' as any,
+        },
+      });
+      const paidMap = new Map<number, number>(
+        paidGroups.map(g => [g.eventId as number, g._sum.quantity ?? 0])
+      );
+
+      filtered = baseList.filter(ev => {
+        const paid = paidMap.get(ev.id) ?? 0;
+        const remainingPaidOnly = Math.max(0, ev.capacity - paid);
+        const salesClosed = now >= getSalesCloseAt(ev.date as Date);
+        return remainingPaidOnly > 0 && !salesClosed;
+      });
+    }
+
+    const total = filtered.length;
+    const start = (page - 1) * limit;
+    const events = filtered.slice(start, start + limit);
+    return res.json({ page, limit, total, pages: Math.ceil(total / limit), events });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Error al obtener eventos públicos' });
@@ -246,7 +358,7 @@ export async function listOrganizerEvents(req: Request, res: Response) {
     const where: any = { organizerId };
 
     if (q) {
-      const contains = { contains: q };
+      const contains: any = { contains: q };
       where.OR = [
         { title: contains },
         { description: contains },
@@ -328,7 +440,7 @@ export async function listPendingEvents(_req: Request, res: Response) {
   }
 }
 
-/* ============= Detalle público (incluye remaining + flags + precio) ============= */
+/* ============= Detalle público ============= */
 export async function getEventDetails(req: Request, res: Response) {
   try {
     const eventId = Number(req.params.id);
@@ -362,33 +474,44 @@ export async function getEventDetails(req: Request, res: Response) {
     const salesCloseAt = getSalesCloseAt(startsAt);
     const salesClosed = now >= salesCloseAt;
 
-    // Entradas ocupadas = pagadas + holds activos (no vencidos)
-    const soldAgg = await prisma.reservation.aggregate({
-      _sum: { quantity: true },
-      where: {
-        eventId,
-        OR: [
-          { status: 'PAID' as any },
-          { status: 'PENDING_PAYMENT' as any, expiresAt: { gt: now } },
-        ],
-      },
-    });
-    const sold = soldAgg._sum.quantity ?? 0;
-    const remaining = Math.max(0, event.capacity - sold);
+    // Ventas pagadas vs reservas activas (pendientes dentro del HOLD)
+    const [paidAgg, pendingAgg] = await Promise.all([
+      prisma.reservation.aggregate({
+        _sum: { quantity: true },
+        where: { eventId, status: 'PAID' as any },
+      }),
+      prisma.reservation.aggregate({
+        _sum: { quantity: true },
+        where: {
+          eventId,
+          status: 'PENDING_PAYMENT' as any,
+          expiresAt: { gt: now },
+          createdAt: { gt: new Date(now.getTime() - HOLD_MS) }, // solo ventana de hold
+        },
+      }),
+    ]);
 
-    // Flags para front
+    const paid = paidAgg._sum.quantity ?? 0;
+    const pendingActive = pendingAgg._sum.quantity ?? 0;
+
+    const remainingPaidOnly = Math.max(0, event.capacity - paid);
+    const remaining = Math.max(0, event.capacity - (paid + pendingActive));
+
     const hasStarted = now >= startsAt;
     const canBuy = event.approved && !hasStarted && !salesClosed && remaining > 0;
 
     return res.json({
       ...event,
       remaining,
+      remainingPaidOnly,
+      pendingActive,
       hasStarted,
       canBuy,
       salesClosed,
       salesCloseAt: salesCloseAt.toISOString(),
       startsAt: startsAt.toISOString(),
       salesCutoffMinutes: SALES_CUTOFF_MINUTES,
+      holdMinutes: HOLD_MINUTES,
     });
   } catch (error) {
     console.error(error);
@@ -422,7 +545,6 @@ export async function purchaseTickets(req: Request, res: Response) {
       const now = new Date();
       const startsAt = ev.date instanceof Date ? ev.date : new Date(ev.date);
 
-      // Cierre por cutoff (p. ej., 24 h antes)
       const closeAt = getSalesCloseAt(startsAt);
       if (now >= closeAt) {
         return {
@@ -431,7 +553,6 @@ export async function purchaseTickets(req: Request, res: Response) {
         };
       }
 
-      // Bloquear si el evento ya comenzó (por si cutoff = 0)
       if (now >= startsAt) {
         return { status: 400, payload: { error: 'El evento ya comenzó. No se pueden comprar entradas.' } };
       }
@@ -440,14 +561,18 @@ export async function purchaseTickets(req: Request, res: Response) {
         return { status: 403, payload: { error: 'No puedes comprar entradas de tu propio evento.' } };
       }
 
-      // Stock: PAID + holds activos
+      // Stock: PAID + PENDING dentro de la ventana de HOLD
       const soldAgg = await tx.reservation.aggregate({
         _sum: { quantity: true },
         where: {
           eventId,
           OR: [
             { status: 'PAID' as any },
-            { status: 'PENDING_PAYMENT' as any, expiresAt: { gt: now } },
+            {
+              status: 'PENDING_PAYMENT' as any,
+              expiresAt: { gt: now },
+              createdAt: { gt: new Date(now.getTime() - HOLD_MS) },
+            },
           ],
         },
       });
@@ -576,6 +701,10 @@ export async function deleteEvent(req: Request, res: Response) {
     return res.status(500).json({ error: 'Error eliminando evento' });
   }
 }
+
+
+
+
 
 
 

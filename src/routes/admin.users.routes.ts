@@ -2,35 +2,35 @@
 import { Router } from "express";
 import {
   adminListUsers,
-  adminSetUserVerified,
   adminSetUserCanSell,
-  adminDeactivateUser,
   adminActivateUser,
+  adminDeactivateUser,
   adminDeleteUserPreview,
   adminSoftDeleteUser,
 } from "../controllers/admin.users.controller";
-import { authenticateToken, authorizeRoles } from "../middleware/authMiddleware";
 
 const router = Router();
 
-// Solo SUPERADMIN
-router.use(authenticateToken, authorizeRoles("superadmin"));
+/**
+ * Base esperada de montaje (ejemplo):
+ * app.use("/api/admin/users", router)
+ */
 
 // Listado
 router.get("/", adminListUsers);
 
-// Verificación y permiso de venta
-router.patch("/:id/verified", adminSetUserVerified);
-router.patch("/:id/can-sell", adminSetUserCanSell);
+// Permiso de venta (toggle)
+router.post("/:id/can-sell", adminSetUserCanSell);
 
-// Activar / Desactivar
-router.post("/:id/deactivate", adminDeactivateUser);
+// Activar / Desactivar cuenta
 router.post("/:id/activate", adminActivateUser);
+router.post("/:id/deactivate", adminDeactivateUser);
 
-// Preview de eliminación y Soft delete
+// Preview de eliminación y soft-delete
 router.get("/:id/delete-preview", adminDeleteUserPreview);
 router.post("/:id/soft-delete", adminSoftDeleteUser);
 
 export default router;
+
 
 

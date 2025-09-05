@@ -1,3 +1,4 @@
+// src/middleware/authMiddleware.ts
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env';
@@ -14,6 +15,15 @@ export interface JwtPayload {
 export interface AuthUser {
   id: number;
   role: 'superadmin' | 'organizer' | 'buyer';
+}
+
+/** Augmentación TS para que req.user sea reconocido en todo el proyecto */
+declare global {
+  namespace Express {
+    interface Request {
+      user?: AuthUser;
+    }
+  }
 }
 
 /**
@@ -119,7 +129,8 @@ export function requireSuperadmin(req: Request, res: Response, next: NextFunctio
  * Requiere que el usuario sea ORGANIZER verificado y con permiso de venta activo.
  * - Si es SUPERADMIN: pasa directo.
  * - Si es ORGANIZER: debe tener cuenta activa (isActive && !deletedAt),
- *   y además isVerified === true y canSell === true.
+ *   y además (isVerified === true) O (OrganizerApplication.status === 'APPROVED'),
+ *   y canSell === true.
  * - Otros roles: 403.
  */
 export async function requireVerifiedOrganizer(req: Request, res: Response, next: NextFunction) {
@@ -136,7 +147,13 @@ export async function requireVerifiedOrganizer(req: Request, res: Response, next
 
     const dbUser = await prisma.user.findUnique({
       where: { id: user.id },
-      select: { isActive: true, deletedAt: true, isVerified: true, canSell: true },
+      select: {
+        isActive: true,
+        deletedAt: true,
+        isVerified: true,
+        canSell: true,
+        application: { select: { status: true } },
+      },
     });
 
     if (!dbUser) return res.status(404).json({ error: 'Usuario no encontrado' });
@@ -145,7 +162,10 @@ export async function requireVerifiedOrganizer(req: Request, res: Response, next
       return res.status(401).json({ error: 'Cuenta desactivada o eliminada' });
     }
 
-    if (!dbUser.isVerified) {
+    const approvedByApp = dbUser.application?.status === 'APPROVED';
+    const isApprovedOrganizer = dbUser.isVerified === true || approvedByApp;
+
+    if (!isApprovedOrganizer) {
       return res.status(403).json({ error: 'Su cuenta está pendiente de verificación' });
     }
     if (!dbUser.canSell) {
@@ -158,6 +178,7 @@ export async function requireVerifiedOrganizer(req: Request, res: Response, next
     return res.status(500).json({ error: 'Error validando permisos de organizador' });
   }
 }
+
 
 
 
