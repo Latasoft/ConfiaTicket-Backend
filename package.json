@@ -4,8 +4,8 @@
   "main": "dist/server.js",
   "scripts": {
     "prebuild": "rimraf dist || rmdir /s /q dist 2> NUL || exit 0",
-    "build": "tsc -p tsconfig.json && prisma generate",
-    "start": "node dist/server.js",
+    "build": "tsc -p tsconfig.json",
+    "start": "prisma db push --accept-data-loss && npm run seed && node dist/server.js",
     "dev": "ts-node --transpile-only src/server.ts",
     "prisma:generate": "prisma generate",
     "migrate:deploy": "prisma migrate deploy",

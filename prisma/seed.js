@@ -1,19 +1,14 @@
 // prisma/seed.ts
 import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
-import bcrypt from 'bcryptjs';
+import bcrypt from 'bcrypt';
 
 const prisma = new PrismaClient();
 
 async function main() {
-  const email = process.env.BOOTSTRAP_ADMIN_EMAIL?.trim();
-  const plain = process.env.BOOTSTRAP_ADMIN_PASSWORD;
-
-  if (!email || !plain) {
-    throw new Error(
-      'Faltan BOOTSTRAP_ADMIN_EMAIL y/o BOOTSTRAP_ADMIN_PASSWORD en las envs.'
-    );
-  }
+  // Datos del admin - usar variables de entorno si están disponibles
+  const email = process.env.BOOTSTRAP_ADMIN_EMAIL || 'admin@confiaticket.com';
+  const plain = process.env.BOOTSTRAP_ADMIN_PASSWORD || 'Admin123!';
 
   const passwordHash = await bcrypt.hash(plain, 12);
 
@@ -39,8 +34,10 @@ async function main() {
     select: { id: true, email: true, role: true, isActive: true, createdAt: true },
   });
 
-  console.log('✅ Superadmin listo:', admin);
+  console.log('✅ Superadmin creado/actualizado:');
   console.log('   Email:', admin.email);
+  console.log('   Password:', plain);
+  console.log('   Rol:', admin.role);
 }
 
 main()
