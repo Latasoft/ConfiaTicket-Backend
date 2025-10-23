@@ -22,6 +22,7 @@ import organizerEventsRouter from './routes/organizer.events.routes';
 import adminEventsRouter from './routes/admin.events.routes';
 import adminUsersRouter from './routes/admin.users.routes';
 import adminOrganizerAppsRouter from './routes/admin.organizerApplications.routes';
+import adminDocumentsRouter from './routes/admin.documents.routes';
 
 // ⭐ Nuevos: pagos
 import paymentsRoutes from './routes/payments.routes';
@@ -154,6 +155,7 @@ app.use('/api/organizer/events', organizerEventsRouter);
 app.use('/api/admin/events', adminEventsRouter);
 app.use('/api/admin/users', adminUsersRouter);
 app.use('/api/admin/organizer-applications', adminOrganizerAppsRouter);
+app.use('/api/admin/documents', adminDocumentsRouter); // Documentos protegidos (fotos de cedula de identidad)
 
 // ⭐ Pagos Webpay/Transbank
 app.use('/api/payments', paymentsRoutes);

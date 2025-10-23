@@ -68,6 +68,7 @@ export async function adminListOrganizerApplications(req: Request, res: Response
       phone: a.phone ?? "",
       notes: a.notes ?? "",
       idCardImage: a.idCardImage,
+      idCardImageUrl: a.idCardImage ? `/api/admin/documents/${a.idCardImage}` : null,
       status: a.status as AppStatus,
       createdAt: a.createdAt,
       updatedAt: a.updatedAt,

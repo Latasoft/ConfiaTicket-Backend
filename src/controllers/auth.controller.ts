@@ -117,9 +117,10 @@ function parseBirthDate(input: string): Date | null {
     const [, yStr, moStr, dStr] = m;
     if (!yStr || !moStr || !dStr) return null;
     const y = Number(yStr);
-    const mo = Number(moStr) - 1;
+    const mo = Number(moStr);
     const d = Number(dStr);
-    const dt = new Date(Date.UTC(y, mo, d));
+    // crear fecha en UTC a las 12:00
+    const dt = new Date(Date.UTC(y, mo - 1, d, 12, 0, 0, 0));
     if (!Number.isNaN(dt.getTime())) return dt;
   }
 
@@ -242,8 +243,7 @@ export async function register(req: Request, res: Response) {
         rut: normRut,
         password: hashed,
         role, // 'buyer' u 'organizer' (superadmin bloqueado arriba)
-        // Si agregaste birthDate en Prisma, puedes guardar:
-        // birthDate: dob,
+        birthDate: dob
       },
       select: {
         id: true,

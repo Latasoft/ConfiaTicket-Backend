@@ -108,6 +108,137 @@ export async function adminListUsers(req: Request, res: Response) {
   });
 }
 
+/**
+ * GET /api/admin/users/:id
+ * Obtiene los detalles completos de un usuario específico
+ */
+export async function adminGetUser(req: Request, res: Response) {
+  const id = Number(req.params.id);
+
+  // validar id
+  if (!id || id <= 0) {
+    return res.status(400).json({ error: "ID de usuario inválido" });
+  }
+
+  // objeto con la informacion del usuario
+  const user = await prisma.user.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      role: true,
+      rut: true,
+      birthDate: true,
+      canSell: true,
+      isVerified: true,
+      isActive: true,
+      deletedAt: true,
+      anonymizedAt: true,
+      documentUrl: true,
+      failedLoginCount: true,
+      lockUntil: true,
+      createdAt: true,
+      updatedAt: true,
+      // informacion de la solicitud para ser organizador
+      application: {
+        select: {
+          id: true,
+          legalName: true,
+          taxId: true,
+          phone: true,
+          idCardImage: true,
+          notes: true,
+          status: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      },
+      // Información bancaria
+      connectedAccount: {
+        select: {
+          id: true,
+          psp: true,
+          pspAccountId: true,
+          onboardingStatus: true,
+          payoutsEnabled: true,
+          payoutBankName: true,
+          payoutAccountType: true,
+          payoutAccountNumber: true,
+          payoutHolderName: true,
+          payoutHolderRut: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      },
+    },
+  });
+
+  if (!user) {
+    return res.status(404).json({ error: "Usuario no encontrado" });
+  }
+
+  // Obtener estadisticas del usuario
+  const [eventsCount, reservationsCount, activeEventsCount] = await Promise.all([
+    // Total de eventos creados
+    prisma.event.count({ where: { organizerId: id } }),
+    // Total de reservas/compras realizadas
+    prisma.reservation.count({ where: { buyerId: id } }),
+    // Eventos activos (aprobados y no vencidos)
+    prisma.event.count({
+      where: {
+        organizerId: id,
+        approved: true,
+        date: { gte: new Date() }, // eventos futuros
+      },
+    }),
+  ]);
+
+  // verificar si esta habilitado para venta
+  const effectiveCanSell =
+    user.role === "organizer" && !!user.canSell && !!user.isActive && !user.deletedAt;
+
+  // formatear información bancaria
+  const bankingInfo = user.connectedAccount ? {
+    hasBankAccount: !!(
+      user.connectedAccount.payoutBankName &&
+      user.connectedAccount.payoutAccountNumber
+    ),
+    payoutsEnabled: user.connectedAccount.payoutsEnabled,
+    bankDetails: {
+      bankName: user.connectedAccount.payoutBankName,
+      accountType: user.connectedAccount.payoutAccountType,
+      accountNumber: user.connectedAccount.payoutAccountNumber,
+      holderName: user.connectedAccount.payoutHolderName,
+      holderRut: user.connectedAccount.payoutHolderRut,
+    },
+    createdAt: user.connectedAccount.createdAt,
+    updatedAt: user.connectedAccount.updatedAt,
+  } : null;
+
+  res.json({
+    ...user,
+    // incluir la url completa de idCardImage si existe
+    application: user.application ? {
+      ...user.application,
+      idCardImageUrl: user.application.idCardImage 
+        ? `/api/admin/documents/${user.application.idCardImage}`
+        : null,
+    } : null,
+    stats: {
+      eventsCreated: eventsCount,
+      purchasesMade: reservationsCount,
+      activeEvents: activeEventsCount,
+    },
+    // estado de permisos
+    effectiveCanSell,
+    // estado de la solicitud de organizador
+    latestOrganizerAppStatus: user.application?.status ?? null,
+    // informacion bancaria
+    bankingInfo,
+  });
+}
+
 /* ========== Acciones principales que sí usamos ========== */
 
 export async function adminSetUserCanSell(req: Request, res: Response) {

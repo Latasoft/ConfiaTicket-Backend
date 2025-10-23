@@ -2,6 +2,7 @@
 import { Router } from "express";
 import {
   adminListUsers,
+  adminGetUser,
   adminSetUserCanSell,
   adminActivateUser,
   adminDeactivateUser,
@@ -18,6 +19,9 @@ const router = Router();
 
 // Listado
 router.get("/", adminListUsers);
+
+// Detalle de un usuario específico
+router.get("/:id", adminGetUser);
 
 // Permiso de venta (toggle)
 router.post("/:id/can-sell", adminSetUserCanSell);

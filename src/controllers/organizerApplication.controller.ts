@@ -27,7 +27,8 @@ export async function applyOrganizer(req: Request, res: Response) {
       return res.status(400).json({ error: 'Archivo requerido (idCardImage)' });
     }
 
-    const normalizedPath = file.path.replace(/\\/g, '/');
+    // extraer solo el nombre del archivo
+    const filename = path.basename(file.path);
 
     // Evitar que un usuario envíe más de una solicitud
     const existing = await prisma.organizerApplication.findUnique({
@@ -45,7 +46,7 @@ export async function applyOrganizer(req: Request, res: Response) {
         taxId,
         phone,
         notes,
-        idCardImage: normalizedPath,
+        idCardImage: filename,
       },
     });
 
