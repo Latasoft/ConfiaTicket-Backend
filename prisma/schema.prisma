@@ -196,6 +196,11 @@ model OrganizerApplication {
   status       ApplicationStatus @default(PENDING)
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
+  payoutBankName      String     @db.VarChar(80)
+  payoutAccountType   AccountType
+  payoutAccountNumber String     @db.VarChar(30)
+  payoutHolderName    String     @db.VarChar(100)
+  payoutHolderRut     String     @db.VarChar(16)
 
   user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
 
