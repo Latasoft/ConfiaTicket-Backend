@@ -78,6 +78,13 @@ export async function adminListUsers(req: Request, res: Response) {
 
   const ids = itemsRaw.map((u) => u.id);
   const lastStatusMap = await getLatestOrganizerAppStatuses(ids);
+  
+  // Obtener también el applicationId para usuarios con solicitudes
+  const applications = await prisma.organizerApplication.findMany({
+    where: { userId: { in: ids } },
+    select: { userId: true, id: true },
+  });
+  const applicationIdMap = new Map(applications.map((a) => [a.userId, a.id]));
 
   const withComputed = itemsRaw.map((u) => {
     const status = lastStatusMap.get(u.id) ?? null;
@@ -87,6 +94,7 @@ export async function adminListUsers(req: Request, res: Response) {
     return {
       ...u,
       latestOrganizerAppStatus: status as "PENDING" | "APPROVED" | "REJECTED" | null,
+      applicationId: applicationIdMap.get(u.id) ?? null,
       effectiveCanSell,
     };
   });
@@ -152,6 +160,12 @@ export async function adminGetUser(req: Request, res: Response) {
           status: true,
           createdAt: true,
           updatedAt: true,
+          // Datos bancarios de la solicitud
+          payoutBankName: true,
+          payoutAccountType: true,
+          payoutAccountNumber: true,
+          payoutHolderName: true,
+          payoutHolderRut: true,
         },
       },
       // Información bancaria
@@ -199,22 +213,46 @@ export async function adminGetUser(req: Request, res: Response) {
     user.role === "organizer" && !!user.canSell && !!user.isActive && !user.deletedAt;
 
   // formatear información bancaria
-  const bankingInfo = user.connectedAccount ? {
-    hasBankAccount: !!(
-      user.connectedAccount.payoutBankName &&
-      user.connectedAccount.payoutAccountNumber
-    ),
-    payoutsEnabled: user.connectedAccount.payoutsEnabled,
-    bankDetails: {
-      bankName: user.connectedAccount.payoutBankName,
-      accountType: user.connectedAccount.payoutAccountType,
-      accountNumber: user.connectedAccount.payoutAccountNumber,
-      holderName: user.connectedAccount.payoutHolderName,
-      holderRut: user.connectedAccount.payoutHolderRut,
-    },
-    createdAt: user.connectedAccount.createdAt,
-    updatedAt: user.connectedAccount.updatedAt,
-  } : null;
+  // Primero intenta usar ConnectedAccount, luego los datos de la Application
+  let bankingInfo = null;
+  
+  if (user.connectedAccount) {
+    // Usuario tiene cuenta conectada (organizador aprobado)
+    bankingInfo = {
+      hasBankAccount: !!(
+        user.connectedAccount.payoutBankName &&
+        user.connectedAccount.payoutAccountNumber
+      ),
+      payoutsEnabled: user.connectedAccount.payoutsEnabled,
+      bankDetails: {
+        bankName: user.connectedAccount.payoutBankName,
+        accountType: user.connectedAccount.payoutAccountType,
+        accountNumber: user.connectedAccount.payoutAccountNumber,
+        holderName: user.connectedAccount.payoutHolderName,
+        holderRut: user.connectedAccount.payoutHolderRut,
+      },
+      createdAt: user.connectedAccount.createdAt,
+      updatedAt: user.connectedAccount.updatedAt,
+    };
+  } else if (user.application?.payoutBankName) {
+    // Usuario tiene solicitud pendiente con datos bancarios
+    bankingInfo = {
+      hasBankAccount: !!(
+        user.application.payoutBankName &&
+        user.application.payoutAccountNumber
+      ),
+      payoutsEnabled: false, // No habilitado hasta ser aprobado
+      bankDetails: {
+        bankName: user.application.payoutBankName,
+        accountType: user.application.payoutAccountType,
+        accountNumber: user.application.payoutAccountNumber,
+        holderName: user.application.payoutHolderName,
+        holderRut: user.application.payoutHolderRut,
+      },
+      createdAt: user.application.createdAt,
+      updatedAt: user.application.updatedAt,
+    };
+  }
 
   res.json({
     ...user,
