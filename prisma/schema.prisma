@@ -67,6 +67,7 @@ model Event {
   commune       String?   @db.VarChar(120)   // 👈 NUEVO
   capacity      Int
   price         Int       @default(0)
+  priceBase     Int?                         // 👈 NUEVO: Precio base para validar reventa
   approved      Boolean   @default(false)
   coverImageUrl String?   @db.VarChar(1024)
 

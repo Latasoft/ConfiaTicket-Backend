@@ -18,6 +18,8 @@ const LIMITS = {
   TITLE: 120,
   DESC: 4000,
   VENUE: 120,
+  CITY: 120,    
+  COMMUNE: 120, 
   COVER: 1024,
 
   PAY_BANK: 80,
@@ -81,7 +83,8 @@ function mapEvent(ev: any) {
     startAt: (ev.date instanceof Date ? ev.date : new Date(ev.date)).toISOString(),
     endAt: null, // no existe en schema
     venue: ev.location,
-    city: undefined, // no existe en schema
+    city: ev.city ?? null,       
+    commune: ev.commune ?? null, 
     capacity: ev.capacity,
     status: ev.approved ? 'approved' : 'pending',
     updatedAt:
@@ -90,6 +93,7 @@ function mapEvent(ev: any) {
 
     // 💲 Precio (CLP enteros)
     price: typeof ev.price === 'number' ? ev.price : 0,
+    priceBase: typeof ev.priceBase === 'number' ? ev.priceBase : null,
 
     // Datos de pago (opcionales)
     payoutBankName: ev.payoutBankName ?? null,
@@ -150,6 +154,8 @@ export async function createMyEvent(req: Request, res: Response) {
     description,
     startAt,
     venue,
+    city,       
+    commune,    
     capacity,
     coverImageUrl,
 
@@ -166,6 +172,8 @@ export async function createMyEvent(req: Request, res: Response) {
     description?: string;
     startAt: string;
     venue: string;
+    city?: string;       
+    commune?: string;    
     capacity: number | string;
     coverImageUrl?: string | null;
 
@@ -218,7 +226,11 @@ export async function createMyEvent(req: Request, res: Response) {
   const _cover = toStr(coverImageUrl);
   if (_cover && _cover.length > LIMITS.COVER) errors.push(`coverImageUrl excede ${LIMITS.COVER} caracteres`);
 
-  // 💲 Precio (opcional). Si viene, validar CLP entero y rango sanitario.
+  const _city = toStr(city);
+  if (_city && _city.length > LIMITS.CITY) errors.push(`city excede ${LIMITS.CITY} caracteres`);
+  const _commune = toStr(commune);
+  if (_commune && _commune.length > LIMITS.COMMUNE) errors.push(`commune excede ${LIMITS.COMMUNE} caracteres`);
+
   let _price: number | undefined = undefined;
   if (price !== undefined) {
     const p = Number(price);
@@ -228,11 +240,13 @@ export async function createMyEvent(req: Request, res: Response) {
   }
 
   // 🧮 Validación de reventa si llega priceBase en la request
+  let _priceBase: number | undefined = undefined;
   if (priceBase !== undefined && _price !== undefined) {
     const base = Number(priceBase);
     if (!Number.isInteger(base) || base < 0) {
       errors.push('priceBase debe ser un entero (CLP) ≥ 0');
     } else {
+      _priceBase = base;
       const maxAllowed = Math.floor(base * 1.3);
       if (_price < base) errors.push('price no puede ser menor a priceBase');
       if (_price > maxAllowed) errors.push(`price no puede superar ${maxAllowed} (base + 30%)`);
@@ -280,6 +294,8 @@ export async function createMyEvent(req: Request, res: Response) {
       description: _desc || '',
       date: new Date(_startAt),
       location: _venue,
+      city: _city || null,       
+      commune: _commune || null, 
       capacity: Math.trunc(_capacityRaw), // ya validado 1..4
       approved: false,
       organizerId: organizer.id,
@@ -287,6 +303,7 @@ export async function createMyEvent(req: Request, res: Response) {
 
       // 💲 persistimos si vino (si no, conservará el default del schema)
       ...(_price !== undefined ? { price: _price } : {}),
+      ...(_priceBase !== undefined ? { priceBase: _priceBase } : {}),
 
       payoutBankName: _bank || null,
       payoutAccountType: _type || null,
@@ -337,6 +354,8 @@ export async function updateMyEvent(req: Request, res: Response) {
     description,
     startAt,
     venue,
+    city,       
+    commune,    
     capacity,
     coverImageUrl,
 
@@ -353,6 +372,8 @@ export async function updateMyEvent(req: Request, res: Response) {
     description: string;
     startAt: string;
     venue: string;
+    city: string;       
+    commune: string;    
     capacity: number | string;
     coverImageUrl: string | null;
 
@@ -392,6 +413,17 @@ export async function updateMyEvent(req: Request, res: Response) {
     if (v.length > LIMITS.VENUE) errors.push(`venue excede ${LIMITS.VENUE} caracteres`);
     data.location = v;
   }
+
+  if (city !== undefined) {
+    const v = toStr(city);
+    if (v && v.length > LIMITS.CITY) errors.push(`city excede ${LIMITS.CITY} caracteres`);
+    data.city = v || null;
+  }
+  if (commune !== undefined) {
+    const v = toStr(commune);
+    if (v && v.length > LIMITS.COMMUNE) errors.push(`commune excede ${LIMITS.COMMUNE} caracteres`);
+    data.commune = v || null;
+  }
   if (capacity !== undefined) {
     const nRaw = Number(capacity);
     if (!Number.isFinite(nRaw)) {
@@ -421,19 +453,26 @@ export async function updateMyEvent(req: Request, res: Response) {
   }
 
   // 🧮 Validación de reventa si llega priceBase en la request junto con price
-  if (priceBase !== undefined && _price !== undefined) {
+  let _priceBase: number | undefined = undefined;
+  if (priceBase !== undefined) {
     const base = Number(priceBase);
     if (!Number.isInteger(base) || base < 0) {
       errors.push('priceBase debe ser un entero (CLP) ≥ 0');
     } else {
-      const maxAllowed = Math.floor(base * 1.3);
-      if (_price < base) errors.push('price no puede ser menor a priceBase');
-      if (_price > maxAllowed) errors.push(`price no puede superar ${maxAllowed} (base + 30%)`);
+      _priceBase = base;
+      if (_price !== undefined) {
+        const maxAllowed = Math.floor(base * 1.3);
+        if (_price < base) errors.push('price no puede ser menor a priceBase');
+        if (_price > maxAllowed) errors.push(`price no puede superar ${maxAllowed} (base + 30%)`);
+      }
     }
   }
 
   if (_price !== undefined) {
     data.price = _price;
+  }
+  if (_priceBase !== undefined) {
+    data.priceBase = _priceBase; // Persistir priceBase
   }
 
   // Pago (opcionales)
