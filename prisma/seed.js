@@ -5,6 +5,87 @@ import bcrypt from 'bcrypt';
 
 const prisma = new PrismaClient();
 
+async function seedConfig() {
+  await prisma.ticketLimitConfig.upsert({
+    where: { eventType: 'RESALE' },
+    update: {},
+    create: {
+      eventType: 'RESALE',
+      minCapacity: 1,
+      maxCapacity: 4,
+    },
+  });
+
+  await prisma.ticketLimitConfig.upsert({
+    where: { eventType: 'OWN' },
+    update: {},
+    create: {
+      eventType: 'OWN',
+      minCapacity: 1,
+      maxCapacity: 999999,
+    },
+  });
+
+  const priceLimitExists = await prisma.priceLimitConfig.findFirst();
+  if (!priceLimitExists) {
+    await prisma.priceLimitConfig.create({
+      data: {
+        minPrice: 0,
+        maxPrice: 10000000,
+        resaleMarkupPercent: 30,
+      },
+    });
+  }
+
+  const fieldLimits = [
+    { fieldName: 'TITLE', maxLength: 120, context: 'EVENT' },
+    { fieldName: 'DESCRIPTION', maxLength: 4000, context: 'EVENT' },
+    { fieldName: 'VENUE', maxLength: 120, context: 'EVENT' },
+    { fieldName: 'CITY', maxLength: 120, context: 'EVENT' },
+    { fieldName: 'COMMUNE', maxLength: 120, context: 'EVENT' },
+    { fieldName: 'COVER_URL', maxLength: 1024, context: 'EVENT' },
+    { fieldName: 'PAYOUT_BANK', maxLength: 80, context: 'PAYOUT' },
+    { fieldName: 'PAYOUT_TYPE', maxLength: 16, context: 'PAYOUT' },
+    { fieldName: 'PAYOUT_NUMBER', maxLength: 30, context: 'PAYOUT' },
+    { fieldName: 'PAYOUT_HOLDER_NAME', maxLength: 100, context: 'PAYOUT' },
+    { fieldName: 'PAYOUT_HOLDER_RUT', maxLength: 16, context: 'PAYOUT' },
+    { fieldName: 'TICKET_CODE', maxLength: 100, context: 'TICKET' },
+    { fieldName: 'TICKET_ROW', maxLength: 20, context: 'TICKET' },
+    { fieldName: 'TICKET_SEAT', maxLength: 20, context: 'TICKET' },
+    { fieldName: 'TICKET_ZONE', maxLength: 50, context: 'TICKET' },
+    { fieldName: 'TICKET_LEVEL', maxLength: 50, context: 'TICKET' },
+    { fieldName: 'TICKET_SECTION', maxLength: 100, context: 'TICKET' },
+    { fieldName: 'TICKET_DESCRIPTION', maxLength: 200, context: 'TICKET' },
+  ];
+
+  for (const field of fieldLimits) {
+    await prisma.fieldLimitConfig.upsert({
+      where: { fieldName: field.fieldName },
+      update: {},
+      create: field,
+    });
+  }
+
+  const systemConfigs = [
+    {
+      category: 'BUSINESS_RULE',
+      key: 'ALLOWED_ACCOUNT_TYPES',
+      value: 'corriente,vista,ahorro,rut',
+      dataType: 'STRING',
+      description: 'Tipos de cuenta bancaria permitidos',
+      isEditable: true,
+    },
+  ];
+
+  for (const config of systemConfigs) {
+    await prisma.systemConfig.upsert({
+      where: { key: config.key },
+      update: {},
+      create: config,
+    });
+  }
+}
+
 async function main() {
   // Datos del admin - usar variables de entorno si están disponibles
   const email = process.env.BOOTSTRAP_ADMIN_EMAIL || 'admin@confiaticket.com';
@@ -38,6 +119,9 @@ async function main() {
   console.log('   Email:', admin.email);
   console.log('   Password:', plain);
   console.log('   Rol:', admin.role);
+
+  // Seed de configuración
+  await seedConfig();
 }
 
 main()

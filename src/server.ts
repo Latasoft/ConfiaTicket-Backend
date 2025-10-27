@@ -24,24 +24,21 @@ import adminUsersRouter from './routes/admin.users.routes';
 import adminOrganizerAppsRouter from './routes/admin.organizerApplications.routes';
 import adminDocumentsRouter from './routes/admin.documents.routes';
 
-// ⭐ Nuevos: pagos
 import paymentsRoutes from './routes/payments.routes';
 
-// ⭐ Nuevos: flujo de tickets (subida/aprobación/descarga)
 import organizerTicketsRoutes from './routes/organizer.tickets.routes';
 import adminTicketsRoutes from './routes/admin.tickets.routes';
 import ticketsRoutes from './routes/tickets.routes';
 
-// ⭐ NUEVO: PSP (split/escrow) – onboarding + webhook + utilidades
 import pspRoutes from './routes/psp.routes';
 
-// ⭐ NUEVO: Adapter HTTP de payouts (Kushki)
 import kushkiAdapter from './routes/payouts.adapter.kushki.routes';
 
-// ⭐ NUEVO: Admin payouts (retry/reconcile manual)
 import adminPayoutsRoutes from './routes/admin.payouts.routes';
 
-// ⭐ Jobs: reconciliación + reintentos
+import configRoutes from './routes/config.routes';
+import adminConfigRoutes from './routes/admin.config.routes';
+
 import { startPayoutsReconcileJob } from './jobs/payouts.reconcile.job';
 import { startPayoutsRetryJob } from './jobs/payouts.retry.job';
 
@@ -150,14 +147,15 @@ app.use('/api/organizers', organizersRoutes);
 app.use('/api/bookings', bookingsRoutes);
 app.use('/api/organizer-applications', organizerApplicationRoutes);
 
-// Nuevas (admin/organizer)
+app.use('/api/config', configRoutes);
+
 app.use('/api/organizer/events', organizerEventsRouter);
 app.use('/api/admin/events', adminEventsRouter);
 app.use('/api/admin/users', adminUsersRouter);
 app.use('/api/admin/organizer-applications', adminOrganizerAppsRouter);
-app.use('/api/admin/documents', adminDocumentsRouter); // Documentos protegidos (fotos de cedula de identidad)
+app.use('/api/admin/documents', adminDocumentsRouter);
+app.use('/api/admin/config', adminConfigRoutes);
 
-// ⭐ Pagos Webpay/Transbank
 app.use('/api/payments', paymentsRoutes);
 
 // ⭐ PSP Marketplace (split/escrow)
