@@ -12,6 +12,13 @@ import {
   organizerUploadTicket,
   organizerListReservations,
 } from "../controllers/tickets.controller";
+import {
+  createTicket,
+  listTickets,
+  getTicket,
+  updateTicket,
+  deleteTicket,
+} from "../controllers/organizer.tickets.controller";
 
 const router = Router();
 
@@ -70,6 +77,41 @@ router.post(
   requireVerifiedOrganizer,
   upload.single("ticket"),
   organizerUploadTicket
+);
+
+router.post(
+  "/events/:eventId/tickets",
+  authenticateToken,
+  requireVerifiedOrganizer,
+  createTicket
+);
+
+router.get(
+  "/events/:eventId/tickets",
+  authenticateToken,
+  requireVerifiedOrganizer,
+  listTickets
+);
+
+router.get(
+  "/events/:eventId/tickets/:ticketId",
+  authenticateToken,
+  requireVerifiedOrganizer,
+  getTicket
+);
+
+router.put(
+  "/events/:eventId/tickets/:ticketId",
+  authenticateToken,
+  requireVerifiedOrganizer,
+  updateTicket
+);
+
+router.delete(
+  "/events/:eventId/tickets/:ticketId",
+  authenticateToken,
+  requireVerifiedOrganizer,
+  deleteTicket
 );
 
 export default router;

@@ -55,6 +55,13 @@ model User {
   @@index([failedLoginCount])
 }
 
+/* ======================= TIPOS DE EVENTOS ======================= */
+
+enum EventType {
+  OWN      // evento propio
+  RESALE   // reventa
+}
+
 /* ======================= EVENTOS ======================= */
 
 model Event {
@@ -62,14 +69,15 @@ model Event {
   title         String    @db.VarChar(120)
   description   String    @db.VarChar(4000)
   date          DateTime
-  location      String    @db.VarChar(120)   // Lugar / recinto
-  city          String?   @db.VarChar(120)   // 👈 NUEVO
-  commune       String?   @db.VarChar(120)   // 👈 NUEVO
+  location      String    @db.VarChar(120)
+  city          String?   @db.VarChar(120)
+  commune       String?   @db.VarChar(120)
   capacity      Int
   price         Int       @default(0)
-  priceBase     Int?                         // 👈 NUEVO: Precio base para validar reventa
+  priceBase     Int?
   approved      Boolean   @default(false)
   coverImageUrl String?   @db.VarChar(1024)
+  eventType     EventType @default(OWN)
 
   organizer     User      @relation("OrganizerEvents", fields: [organizerId], references: [id])
   organizerId   Int
@@ -78,6 +86,7 @@ model Event {
   updatedAt     DateTime  @updatedAt @default(now())
 
   reservations  Reservation[]
+  tickets       Ticket[]
 
   // (LEGADO) Datos bancarios por evento — se recomienda moverlos al perfil/PSP del organizador
   payoutBankName      String? @db.VarChar(80)
@@ -92,8 +101,37 @@ model Event {
   @@index([organizerId])
   @@index([approved])
   @@index([date])
-  @@index([city])
-  @@index([commune])
+  @@index([eventType])
+}
+
+/* ===================== TICKETS ===================== */
+
+model Ticket {
+  id            Int       @id @default(autoincrement())
+  event         Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId       Int
+
+  // Campos para RESALE
+  ticketCode    String?   @db.VarChar(100) // codigo del ticket
+  row           String?   @db.VarChar(20)  // fila
+  seat          String?   @db.VarChar(20)  // asiento
+  zone          String?   @db.VarChar(50)  // zona
+  level         String?   @db.VarChar(50)  // nivel
+
+  // Campos para OWN
+  sectionName   String?   @db.VarChar(100) // nombre seccion (platea, etc)
+  rowStart      String?   @db.VarChar(20)  // numero o letra de la primera fila
+  rowEnd        String?   @db.VarChar(20)  // numero o letra de la ultima fila
+  seatsPerRow   Int?                       // cantidad asientos por fila
+  seatStart     Int?                       // asiento inicial
+  seatEnd       Int?                       // asiento final
+
+  description   String?   @db.VarChar(200)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt @default(now())
+
+  @@index([eventId])
+  @@index([ticketCode])
 }
 
 /* ============ RESERVAS (COMPRA PRIMARIA) ============ */
@@ -557,6 +595,68 @@ model EscrowTimeline {
 
   @@index([orderId])
 }
+
+enum ConfigCategory {
+  TICKET_LIMIT
+  PRICE_LIMIT
+  FIELD_LIMIT
+  BUSINESS_RULE
+}
+
+enum ConfigDataType {
+  INTEGER
+  DECIMAL
+  STRING
+  BOOLEAN
+}
+
+model SystemConfig {
+  id          Int            @id @default(autoincrement())
+  category    ConfigCategory
+  key         String         @unique @db.VarChar(100)
+  value       String         @db.VarChar(500)
+  dataType    ConfigDataType
+  description String?        @db.VarChar(500)
+  isEditable  Boolean        @default(true)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt @default(now())
+
+  @@index([category])
+  @@index([key])
+}
+
+model TicketLimitConfig {
+  id          Int      @id @default(autoincrement())
+  eventType   String   @unique @db.VarChar(20)
+  minCapacity Int
+  maxCapacity Int
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt @default(now())
+
+  @@index([eventType])
+}
+
+model PriceLimitConfig {
+  id                  Int      @id @default(autoincrement())
+  minPrice            Int
+  maxPrice            Int
+  resaleMarkupPercent Int
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt @default(now())
+}
+
+model FieldLimitConfig {
+  id          Int      @id @default(autoincrement())
+  fieldName   String   @unique @db.VarChar(100)
+  maxLength   Int
+  context     String?  @db.VarChar(100)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt @default(now())
+
+  @@index([fieldName])
+  @@index([context])
+}
+
 
 
 
