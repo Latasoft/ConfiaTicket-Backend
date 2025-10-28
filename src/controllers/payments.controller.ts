@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 // ⬇️ Provider de payouts (http/sim)
 import { getPayoutProvider } from '../services/payouts/provider';
+import { processReservationAfterPayment } from '../services/reservation.service';
 import crypto from 'crypto';
 
 // Transbank SDK (Node)
@@ -555,6 +556,15 @@ export async function capturePayment(req: Request, res: Response) {
 
       return { pay, resv, payout };
     });
+
+    // Procesar reserva FUERA de la transacción para evitar timeout
+    // (generar PDF para OWN, marcar vendido para RESALE)
+    try {
+      await processReservationAfterPayment(updated.resv.id);
+    } catch (pdfError) {
+      console.error('Error procesando reserva después del pago:', pdfError);
+      // No fallar la respuesta, el pago ya se confirmó
+    }
 
     return res.status(200).json({
       ok: true,
