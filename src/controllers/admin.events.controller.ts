@@ -45,6 +45,7 @@ function mapEvent(ev: any) {
     venue: ev.location,
     capacity: ev.capacity,
     status: ev.approved ? ('approved' as AdminStatus) : ('pending' as AdminStatus),
+    eventType: ev.eventType,
     organizerId: ev.organizerId,
     organizer: ev.organizer
       ? {

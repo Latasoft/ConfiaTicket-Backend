@@ -87,6 +87,7 @@ model Event {
 
   reservations  Reservation[]
   tickets       Ticket[]
+  sections      EventSection[]  // Para eventos OWN
 
   // (LEGADO) Datos bancarios por evento — se recomienda moverlos al perfil/PSP del organizador
   payoutBankName      String? @db.VarChar(80)
@@ -104,34 +105,63 @@ model Event {
   @@index([eventType])
 }
 
-/* ===================== TICKETS ===================== */
+/* ===================== TICKETS (Solo RESALE) ===================== */
 
 model Ticket {
   id            Int       @id @default(autoincrement())
   event         Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
   eventId       Int
 
-  // Campos para RESALE
-  ticketCode    String?   @db.VarChar(100) // codigo del ticket
-  row           String?   @db.VarChar(20)  // fila
-  seat          String?   @db.VarChar(20)  // asiento
-  zone          String?   @db.VarChar(50)  // zona
-  level         String?   @db.VarChar(50)  // nivel
-
-  // Campos para OWN
-  sectionName   String?   @db.VarChar(100) // nombre seccion (platea, etc)
-  rowStart      String?   @db.VarChar(20)  // numero o letra de la primera fila
-  rowEnd        String?   @db.VarChar(20)  // numero o letra de la ultima fila
-  seatsPerRow   Int?                       // cantidad asientos por fila
-  seatStart     Int?                       // asiento inicial
-  seatEnd       Int?                       // asiento final
-
+  // Metadata del ticket fisico (solo RESALE)
+  ticketCode    String    @db.VarChar(100)
+  row           String    @db.VarChar(20)
+  seat          String    @db.VarChar(20)
+  zone          String?   @db.VarChar(50)
+  level         String?   @db.VarChar(50)
   description   String?   @db.VarChar(200)
+
+  // Archivo del ticket original
+  imageFilePath String    @db.VarChar(1024)
+  imageFileName String    @db.VarChar(255)
+  imageMime     String    @db.VarChar(127)
+  imageChecksum String?   @db.VarChar(64)
+
+  // Estado de venta
+  sold          Boolean   @default(false)
+  soldAt        DateTime?
+  
+  // Relacion 1-to-1 con Reservation
+  reservationId Int?      @unique
+  reservation   Reservation? @relation(fields: [reservationId], references: [id])
+
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt @default(now())
 
+  @@index([eventId, sold])
+  @@unique([eventId, ticketCode])
+}
+
+/* ===================== SECCIONES (Solo OWN) ===================== */
+
+model EventSection {
+  id            Int      @id @default(autoincrement())
+  event         Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId       Int
+
+  // Metadata de la seccion
+  name          String   @db.VarChar(100)
+  rowStart      String?  @db.VarChar(20)
+  rowEnd        String?  @db.VarChar(20)
+  seatsPerRow   Int?
+  seatStart     Int?
+  seatEnd       Int?
+  totalCapacity Int      // Calculado
+  description   String?  @db.VarChar(200)
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt @default(now())
+
   @@index([eventId])
-  @@index([ticketCode])
 }
 
 /* ============ RESERVAS (COMPRA PRIMARIA) ============ */
@@ -168,6 +198,10 @@ model Reservation {
   buyerId   Int
   quantity  Int
 
+  // Agrupacion de multiples reservas en una compra
+  purchaseGroupId String?        @db.VarChar(36)
+  sectionId       Int?           // FK a EventSection para eventos OWN con secciones
+
   // Hold + pago
   status    ReservationStatus @default(PENDING_PAYMENT)
   code      String            @db.VarChar(36) @unique @default(uuid())
@@ -180,7 +214,20 @@ model Reservation {
   // 1–1 con Payment (Payment.reservationId es el FK)
   payment   Payment?
 
-  // Flujo de ticket
+  // Relacion con Ticket (solo RESALE) - vinculacion inversa
+  ticket    Ticket?
+
+  // Para eventos OWN: tickets generados (1 PDF por ticket comprado)
+  generatedTickets  GeneratedTicket[]
+  
+  // LEGACY: campos deprecados, mantener por compatibilidad
+  seatAssignment    String?  @db.VarChar(500)  // "A15, A16, A17"
+  generatedPdfPath  String?  @db.VarChar(1024)
+  qrCode            String?  @db.VarChar(100)
+  scanned           Boolean  @default(false)
+  scannedAt         DateTime?
+
+  // Flujo de ticket (LEGACY - mantener para compatibilidad)
   fulfillmentStatus  FulfillmentStatus @default(WAITING_TICKET)
   ticketFilePath     String?           @db.VarChar(1024)
   ticketFileName     String?           @db.VarChar(255)
@@ -214,6 +261,36 @@ model Reservation {
   @@index([approvedByAdminId])
   @@index([status, ticketUploadDeadlineAt])
   @@index([refundStatus])
+  @@index([qrCode])
+  @@index([scanned])
+  @@index([purchaseGroupId])
+  @@index([sectionId])
+}
+
+/* ============ TICKETS GENERADOS (OWN) ============ */
+
+model GeneratedTicket {
+  id            Int      @id @default(autoincrement())
+  reservation   Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  reservationId Int
+  
+  // Datos del ticket individual
+  ticketNumber  Int      // 1, 2, 3... (número dentro de la reserva)
+  seatNumber    String?  @db.VarChar(50)  // "A15", "VIP-23", etc.
+  qrCode        String   @db.VarChar(100) @unique
+  pdfPath       String   @db.VarChar(1024)
+  
+  // Estado del ticket
+  scanned       Boolean  @default(false)
+  scannedAt     DateTime?
+  scannedBy     String?  @db.VarChar(100)  // Identificador del escáner/usuario
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt @default(now())
+
+  @@index([reservationId])
+  @@index([qrCode])
+  @@index([scanned])
 }
 
 /* ============ SOLICITUD ORGANIZADOR ============ */

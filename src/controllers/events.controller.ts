@@ -205,7 +205,7 @@ export async function listPublicEvents(req: Request, res: Response) {
           select: {
             id: true, title: true, description: true, date: true, location: true,
             capacity: true, price: true, organizerId: true, approved: true,
-            createdAt: true, coverImageUrl: true,
+            createdAt: true, coverImageUrl: true, eventType: true,
           },
         }),
         prisma.event.findMany({
@@ -215,7 +215,7 @@ export async function listPublicEvents(req: Request, res: Response) {
           select: {
             id: true, title: true, description: true, date: true, location: true,
             capacity: true, price: true, organizerId: true, approved: true,
-            createdAt: true, coverImageUrl: true,
+            createdAt: true, coverImageUrl: true, eventType: true,
           },
         }),
       ]);
@@ -296,7 +296,7 @@ export async function listPublicEvents(req: Request, res: Response) {
       select: {
         id: true, title: true, description: true, date: true, location: true,
         capacity: true, price: true, organizerId: true, approved: true,
-        createdAt: true, coverImageUrl: true,
+        createdAt: true, coverImageUrl: true, eventType: true,
       },
     });
 
@@ -395,6 +395,7 @@ export async function listOrganizerEvents(req: Request, res: Response) {
           approved: true,
           createdAt: true,
           coverImageUrl: true,
+          eventType: true,
         },
       }),
       prisma.event.count({ where }),
@@ -430,6 +431,7 @@ export async function listPendingEvents(_req: Request, res: Response) {
         organizerId: true,
         approved: true,
         coverImageUrl: true,
+        eventType: true,
       },
     });
 
@@ -461,6 +463,7 @@ export async function getEventDetails(req: Request, res: Response) {
         approved: true,
         coverImageUrl: true,
         organizerId: true,
+        eventType: true,
         organizer: { select: { id: true, name: true, email: true } },
       },
     });
