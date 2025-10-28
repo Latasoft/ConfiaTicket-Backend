@@ -1,5 +1,5 @@
-// src/routes/organizer.tickets.routes.ts
-// NO importes FileFilterCallback
+// src/routes/organizer.resaleTickets.routes.ts
+// Rutas para gestión de tickets de reventa (resale)
 import multer from "multer";
 import path from "path";
 import fs from "fs";
@@ -18,16 +18,16 @@ import {
   getTicket,
   updateTicket,
   deleteTicket,
-} from "../controllers/organizer.tickets.controller";
+} from "../controllers/organizer.resaleTickets.controller";
 
 const router = Router();
 
-// Base de uploads (misma que en server.ts)
+// base de uploads (la misma que en server.ts)
 const UPLOADS_BASE = process.env.UPLOAD_DIR
   ? path.resolve(process.env.UPLOAD_DIR)
   : path.join(process.cwd(), "uploads");
 
-// 👉 Guardamos tickets en PRIVADO (no público)
+// los tickets se guardan en private
 const TICKETS_DIR = path.join(UPLOADS_BASE, "private", "tickets");
 fs.mkdirSync(TICKETS_DIR, { recursive: true });
 
@@ -42,13 +42,11 @@ const storage = multer.diskStorage({
 
 const allowed = new Set(["application/pdf", "image/png", "image/jpeg"]);
 
-// Usa el tipo que provee Multer para fileFilter y NO pases Error
 const fileFilter: multer.Options["fileFilter"] = (_req, file, cb) => {
   if (allowed.has(file.mimetype)) {
     cb(null, true); // aceptar
   } else {
-    cb(null, false); // rechazar silenciosamente
-    // (_req as any).fileValidationError = "Tipo de archivo no permitido";
+    cb(null, false); // rechazar 
   }
 };
 
@@ -59,10 +57,10 @@ const upload = multer({
 });
 
 // =====================
-// RUTAS (montadas bajo /api/organizer en server.ts)
+// RUTAS /api/organizer en server.ts)
 // =====================
 
-// Listar reservas de eventos del organizador (para la tabla en la misma página)
+// obtener reservas de eventos del organizador
 router.get(
   "/reservations",
   authenticateToken,
@@ -83,6 +81,7 @@ router.post(
   "/events/:eventId/tickets",
   authenticateToken,
   requireVerifiedOrganizer,
+  upload.single("file"),
   createTicket
 );
 
