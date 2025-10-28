@@ -26,7 +26,8 @@ import adminDocumentsRouter from './routes/admin.documents.routes';
 
 import paymentsRoutes from './routes/payments.routes';
 
-import organizerTicketsRoutes from './routes/organizer.tickets.routes';
+import organizerResaleTicketsRoutes from './routes/organizer.resaleTickets.routes';
+import organizerOwnEventSectionsRoutes from './routes/organizer.ownEventSections.routes';
 import adminTicketsRoutes from './routes/admin.tickets.routes';
 import ticketsRoutes from './routes/tickets.routes';
 
@@ -41,6 +42,7 @@ import adminConfigRoutes from './routes/admin.config.routes';
 
 import { startPayoutsReconcileJob } from './jobs/payouts.reconcile.job';
 import { startPayoutsRetryJob } from './jobs/payouts.retry.job';
+import { startCleanExpiredReservationsJob } from './jobs/cleanExpiredReservations.job';
 
 const app = express();
 
@@ -75,7 +77,7 @@ app.use(
 app.use(
   rateLimit({
     windowMs: 60 * 1000,
-    max: 200, // 200 req/min por IP
+    max: 500, // 500 req/min por IP (aumentado para desarrollo)
     standardHeaders: true,
     legacyHeaders: false,
   })
@@ -165,7 +167,11 @@ app.use('/api/psp', pspRoutes);
 app.use('/adapter/kushki', kushkiAdapter);
 
 // ⭐ Flujo de tickets
-app.use('/api/organizer', organizerTicketsRoutes);
+// reventa
+app.use('/api/organizer', organizerResaleTicketsRoutes);
+// evento propio
+app.use('/api/organizer', organizerOwnEventSectionsRoutes);
+// admin y comprador
 app.use('/api/admin', adminTicketsRoutes);
 app.use('/api/tickets', ticketsRoutes);
 
@@ -195,6 +201,7 @@ const host = '0.0.0.0';
 if ((process.env.NODE_ENV ?? 'development') !== 'test') {
   startPayoutsReconcileJob();
   startPayoutsRetryJob();
+  startCleanExpiredReservationsJob(5); // Ejecutar cada 5 minutos
 }
 
 let server: import('http').Server | undefined;
