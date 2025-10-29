@@ -1,5 +1,6 @@
 // src/services/psp/provider.ts
 import { env } from "../../config/env";
+import { getPlatformFeeBps } from "../config.service";
 
 /* =========================================================
    Tipos y enums normalizados (alineados con tu schema Prisma)
@@ -262,7 +263,7 @@ export interface PspProvider {
 
   /* ====== Utilidades ====== */
   /** Calcula fee/neto según tus reglas de split (se persiste en Payment) */
-  computeSplit(amount: number, rule: SplitRule): SplitBreakdown;
+  computeSplit(amount: number, rule: SplitRule): Promise<SplitBreakdown>;
 }
 
 /* =========================================================
@@ -277,15 +278,27 @@ class SimulatedPspProvider implements PspProvider {
   constructor() {
     this.capturePolicy = (env.PSP_CAPTURE_POLICY as CapturePolicy) ?? "MANUAL_ON_APPROVAL";
     this.defaultCurrency = "CLP";
+    // Default de variable de entorno (fallback si falla DB)
     this.appFeeBpsDefault = Number.isFinite(Number(env.PSP_APP_FEE_BPS))
       ? Number(env.PSP_APP_FEE_BPS)
       : 0;
   }
 
-  computeSplit(amount: number, rule: SplitRule): SplitBreakdown {
-    const bps = Number.isFinite(rule?.applicationFeeBps)
-      ? Math.max(0, rule.applicationFeeBps)
-      : Math.max(0, this.appFeeBpsDefault);
+  async computeSplit(amount: number, rule: SplitRule): Promise<SplitBreakdown> {
+    // Prioridad: rule.applicationFeeBps > DB > env > 0
+    let bps = 0;
+    
+    if (Number.isFinite(rule?.applicationFeeBps)) {
+      bps = Math.max(0, rule.applicationFeeBps);
+    } else {
+      // Intentar obtener de la base de datos
+      try {
+        const dbFeeBps = await getPlatformFeeBps();
+        bps = dbFeeBps > 0 ? dbFeeBps : this.appFeeBpsDefault;
+      } catch {
+        bps = this.appFeeBpsDefault;
+      }
+    }
 
     const applicationFeeAmount = Math.floor((amount * bps) / 10_000); // redondeo hacia abajo
     const netAmount = Math.max(0, amount - applicationFeeAmount);
@@ -301,7 +314,7 @@ class SimulatedPspProvider implements PspProvider {
   async createPayment(req: CreatePaymentRequest): Promise<CreatePaymentResult> {
     const currency = (req.currency ?? this.defaultCurrency) as Currency;
     const capturePolicy = (req.capturePolicy ?? this.capturePolicy) as CapturePolicy;
-    const split = this.computeSplit(req.amount, req.split);
+    const split = await this.computeSplit(req.amount, req.split);
 
     const now = new Date();
     const expires = new Date(now.getTime() + (Number(env.AUTH_HOLD_HOURS) || 72) * 3600 * 1000);

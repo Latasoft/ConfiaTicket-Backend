@@ -4,6 +4,7 @@ import prisma from '../prisma/client';
 let configCache: {
   ticketLimits?: any;
   priceLimits?: any;
+  platformFee?: any;
   fieldLimits?: any;
   businessRules?: any;
   lastFetch?: number;
@@ -18,9 +19,10 @@ async function refreshConfigCache() {
     return;
   }
 
-  const [ticketLimits, priceLimit, fieldLimits, systemConfigs] = await Promise.all([
+  const [ticketLimits, priceLimit, platformFee, fieldLimits, systemConfigs] = await Promise.all([
     prisma.ticketLimitConfig.findMany(),
     prisma.priceLimitConfig.findFirst(),
+    prisma.platformFeeConfig.findFirst(),
     prisma.fieldLimitConfig.findMany(),
     prisma.systemConfig.findMany(),
   ]);
@@ -29,7 +31,7 @@ async function refreshConfigCache() {
   for (const limit of ticketLimits) {
     configCache.ticketLimits[limit.eventType] = {
       MIN: limit.minCapacity,
-      MAX: limit.maxCapacity,
+      MAX: limit.maxCapacity, // Puede ser null para indicar sin límite
     };
   }
 
@@ -37,6 +39,11 @@ async function refreshConfigCache() {
     MIN: priceLimit?.minPrice ?? 0,
     MAX: priceLimit?.maxPrice ?? 10000000,
     RESALE_MARKUP_PERCENT: priceLimit?.resaleMarkupPercent ?? 30,
+  };
+
+  configCache.platformFee = {
+    FEE_BPS: platformFee?.feeBps ?? 0,
+    FEE_PERCENT: ((platformFee?.feeBps ?? 0) / 100).toFixed(2),
   };
 
   configCache.fieldLimits = {};
@@ -72,6 +79,16 @@ export async function getPriceLimits() {
   return configCache.priceLimits!;
 }
 
+export async function getPlatformFee() {
+  await refreshConfigCache();
+  return configCache.platformFee!;
+}
+
+export async function getPlatformFeeBps(): Promise<number> {
+  await refreshConfigCache();
+  return configCache.platformFee?.FEE_BPS ?? 0;
+}
+
 export async function getFieldLimits() {
   await refreshConfigCache();
   return configCache.fieldLimits!;
@@ -87,6 +104,7 @@ export async function getAllConfig() {
   return {
     ticketLimits: configCache.ticketLimits,
     priceLimits: configCache.priceLimits,
+    platformFee: configCache.platformFee,
     fieldLimits: configCache.fieldLimits,
     businessRules: configCache.businessRules,
   };
