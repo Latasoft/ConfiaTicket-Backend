@@ -6,6 +6,8 @@ import {
   updateTicketLimit,
   getPriceLimit,
   updatePriceLimit,
+  getPlatformFee,
+  updatePlatformFee,
   listFieldLimits,
   updateFieldLimit,
   listSystemConfigs,
@@ -19,6 +21,9 @@ router.put('/ticket-limits/:eventType', authenticateToken, requireSuperadmin, up
 
 router.get('/price-limit', authenticateToken, requireSuperadmin, getPriceLimit);
 router.put('/price-limit', authenticateToken, requireSuperadmin, updatePriceLimit);
+
+router.get('/platform-fee', authenticateToken, requireSuperadmin, getPlatformFee);
+router.put('/platform-fee', authenticateToken, requireSuperadmin, updatePlatformFee);
 
 router.get('/field-limits', authenticateToken, requireSuperadmin, listFieldLimits);
 router.put('/field-limits/:fieldName', authenticateToken, requireSuperadmin, updateFieldLimit);
