@@ -706,7 +706,7 @@ model TicketLimitConfig {
   id          Int      @id @default(autoincrement())
   eventType   String   @unique @db.VarChar(20)
   minCapacity Int
-  maxCapacity Int
+  maxCapacity Int?     // Nullable para permitir sin límite (solo para OWN)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt @default(now())
 
@@ -720,6 +720,14 @@ model PriceLimitConfig {
   resaleMarkupPercent Int
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt @default(now())
+}
+
+model PlatformFeeConfig {
+  id              Int      @id @default(autoincrement())
+  feeBps          Int      @default(0)    // Basis points: 100 bps = 1%
+  description     String?  @db.VarChar(500)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt @default(now())
 }
 
 model FieldLimitConfig {

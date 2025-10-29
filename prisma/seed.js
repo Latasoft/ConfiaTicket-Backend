@@ -84,6 +84,26 @@ async function seedConfig() {
       create: config,
     });
   }
+
+  // Platform Fee Config - usar variable de entorno si está disponible
+  const feeBpsFromEnv = process.env.PSP_APP_FEE_BPS ? parseInt(process.env.PSP_APP_FEE_BPS) : null;
+  const defaultFeeBps = 250; // 2.5% por defecto
+  
+  const platformFeeExists = await prisma.platformFeeConfig.findFirst();
+  if (!platformFeeExists) {
+    await prisma.platformFeeConfig.create({
+      data: {
+        feeBps: feeBpsFromEnv ?? defaultFeeBps,
+        // description: null, // Campo vacío por defecto para que se muestre el placeholder
+      },
+    });
+  } else if (feeBpsFromEnv !== null) {
+    // Si existe en .env, sobrescribir el valor en BD
+    await prisma.platformFeeConfig.update({
+      where: { id: platformFeeExists.id },
+      data: { feeBps: feeBpsFromEnv },
+    });
+  }
 }
 
 async function main() {
