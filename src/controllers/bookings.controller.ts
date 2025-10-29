@@ -3,12 +3,12 @@ import { Request, Response } from "express";
 import prisma from "../prisma/client";
 import { Prisma } from "@prisma/client";
 import { processReservationAfterPayment } from "../services/reservation.service";
+import { getTicketLimits } from "../services/config.service";
 import crypto from "crypto";
 
 type Authed = Request & { user?: { id: number; role: string; verifiedOrganizer?: boolean } };
 
 const HOLD_MINUTES = 10;
-const MAX_PER_PURCHASE = 4;
 
 /* ===================== Helpers ===================== */
 function parseIntSafe(v: unknown, def = 0) {
@@ -131,12 +131,18 @@ export async function holdReservation(req: Authed, res: Response) {
           throw e;
         }
 
-        // Validar cantidad total SOLO para eventos RESALE
+        // Validar cantidad total según el tipo de evento
         const totalQuantity = sectionsToReserve.reduce((sum, s) => sum + s.quantity, 0);
-        if (ev.eventType === 'RESALE' && totalQuantity > MAX_PER_PURCHASE) {
+        
+        // Obtener límites de la configuración
+        const ticketLimits = await getTicketLimits();
+        const maxAllowed = ticketLimits[ev.eventType]?.MAX || 999999;
+        
+        if (totalQuantity > maxAllowed) {
           const e = new Error("MAX_PER_PURCHASE_EXCEEDED") as any;
           e.status = 422;
-          e.max = MAX_PER_PURCHASE;
+          e.max = maxAllowed;
+          e.eventType = ev.eventType;
           throw e;
         }
 
@@ -498,9 +504,6 @@ export async function createBooking(req: Authed, res: Response) {
     }
     if (!quantity || !Number.isInteger(quantity) || quantity < 1) {
       return res.status(400).json({ error: "quantity debe ser un entero >= 1" });
-    }
-    if (quantity > MAX_PER_PURCHASE) {
-      return res.status(422).json({ error: `Máximo permitido: ${MAX_PER_PURCHASE}` });
     }
 
     const created = await prisma.$transaction(async (tx) => {

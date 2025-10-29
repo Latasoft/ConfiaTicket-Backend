@@ -12,7 +12,7 @@ export async function updateTicketLimit(req: Request, res: Response) {
   const eventType = req.params.eventType as string;
   const { minCapacity, maxCapacity } = req.body as {
     minCapacity: number;
-    maxCapacity: number;
+    maxCapacity: number | null;
   };
 
   const errors: string[] = [];
@@ -24,11 +24,25 @@ export async function updateTicketLimit(req: Request, res: Response) {
   if (typeof minCapacity !== 'number' || minCapacity < 0) {
     errors.push('minCapacity debe ser un numero mayor o igual a 0');
   }
-  if (typeof maxCapacity !== 'number' || maxCapacity < 1) {
-    errors.push('maxCapacity debe ser un numero mayor a 0');
-  }
-  if (minCapacity >= maxCapacity) {
-    errors.push('minCapacity debe ser menor que maxCapacity');
+
+  // Para eventos OWN, maxCapacity puede ser null (sin límite)
+  if (eventType === 'OWN') {
+    if (maxCapacity !== null) {
+      if (typeof maxCapacity !== 'number' || maxCapacity < 1) {
+        errors.push('maxCapacity debe ser un numero mayor a 0 o null para sin límite');
+      }
+      if (typeof maxCapacity === 'number' && minCapacity >= maxCapacity) {
+        errors.push('minCapacity debe ser menor que maxCapacity');
+      }
+    }
+  } else {
+    // RESALE siempre requiere maxCapacity
+    if (typeof maxCapacity !== 'number' || maxCapacity < 1) {
+      errors.push('maxCapacity debe ser un numero mayor a 0');
+    }
+    if (typeof maxCapacity === 'number' && minCapacity >= maxCapacity) {
+      errors.push('minCapacity debe ser menor que maxCapacity');
+    }
   }
 
   if (errors.length) {
@@ -87,6 +101,54 @@ export async function updatePriceLimit(req: Request, res: Response) {
   } else {
     updated = await prisma.priceLimitConfig.create({
       data: { minPrice, maxPrice, resaleMarkupPercent },
+    });
+  }
+
+  clearConfigCache();
+  res.json(updated);
+}
+
+export async function getPlatformFee(_req: Request, res: Response) {
+  const fee = await prisma.platformFeeConfig.findFirst();
+  res.json(fee);
+}
+
+export async function updatePlatformFee(req: Request, res: Response) {
+  const { feeBps, description } = req.body as {
+    feeBps: number;
+    description?: string;
+  };
+
+  const errors: string[] = [];
+
+  if (typeof feeBps !== 'number' || feeBps < 0) {
+    errors.push('feeBps debe ser un numero mayor o igual a 0');
+  }
+  if (feeBps > 10000) {
+    errors.push('feeBps no puede ser mayor a 10000 (100%)');
+  }
+
+  if (errors.length) {
+    return res.status(400).json({ error: 'Datos invalidos', details: errors });
+  }
+
+  const existing = await prisma.platformFeeConfig.findFirst();
+
+  let updated;
+  if (existing) {
+    updated = await prisma.platformFeeConfig.update({
+      where: { id: existing.id },
+      data: { 
+        feeBps,
+        ...(description !== undefined ? { description } : {}),
+      },
+    });
+  } else {
+    updated = await prisma.platformFeeConfig.create({
+      data: { 
+        feeBps,
+        description: description || 'Comisión de la plataforma en basis points (100 bps = 1%)',
+      },
     });
   }
 

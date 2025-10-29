@@ -181,8 +181,11 @@ export async function createMyEvent(req: Request, res: Response) {
         errors.push(`Reventa: La cantidad de entradas debe estar entre ${TICKET_LIMITS.RESALE.MIN} y ${TICKET_LIMITS.RESALE.MAX}.`);
       }
     } else {
-      if (cap < TICKET_LIMITS.OWN.MIN || cap > TICKET_LIMITS.OWN.MAX) {
-        errors.push(`Evento propio: La capacidad debe estar entre ${TICKET_LIMITS.OWN.MIN} y ${TICKET_LIMITS.OWN.MAX.toLocaleString()}.`);
+      // Para eventos OWN, si MAX es null significa sin límite
+      if (cap < TICKET_LIMITS.OWN.MIN) {
+        errors.push(`Evento propio: La capacidad debe ser al menos ${TICKET_LIMITS.OWN.MIN}.`);
+      } else if (TICKET_LIMITS.OWN.MAX !== null && cap > TICKET_LIMITS.OWN.MAX) {
+        errors.push(`Evento propio: La capacidad no puede exceder ${TICKET_LIMITS.OWN.MAX.toLocaleString()}.`);
       }
     }
   }
@@ -393,8 +396,11 @@ export async function updateMyEvent(req: Request, res: Response) {
           errors.push(`Reventa: La cantidad de entradas debe estar entre ${TICKET_LIMITS.RESALE.MIN} y ${TICKET_LIMITS.RESALE.MAX}.`);
         }
       } else {
-        if (n < TICKET_LIMITS.OWN.MIN || n > TICKET_LIMITS.OWN.MAX) {
-          errors.push(`Evento propio: La capacidad debe estar entre ${TICKET_LIMITS.OWN.MIN} y ${TICKET_LIMITS.OWN.MAX.toLocaleString()}.`);
+        // Para eventos OWN, si MAX es null significa sin límite
+        if (n < TICKET_LIMITS.OWN.MIN) {
+          errors.push(`Evento propio: La capacidad debe ser al menos ${TICKET_LIMITS.OWN.MIN}.`);
+        } else if (TICKET_LIMITS.OWN.MAX !== null && n > TICKET_LIMITS.OWN.MAX) {
+          errors.push(`Evento propio: La capacidad no puede exceder ${TICKET_LIMITS.OWN.MAX.toLocaleString()}.`);
         }
       }
       
