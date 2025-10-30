@@ -387,13 +387,25 @@ export async function me(req: Request, res: Response) {
         isVerified: true,
         canSell: true,
         rut: true,
+        application: {
+          select: {
+            status: true,
+          },
+        },
       },
     });
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
     const verifiedOrganizer = user.role === 'organizer' && user.isVerified === true && user.canSell === true;
 
-    return res.json({ id: user.id, name: user.name, role: user.role, rut: user.rut ?? null, verifiedOrganizer });
+    return res.json({ 
+      id: user.id, 
+      name: user.name, 
+      role: user.role, 
+      rut: user.rut ?? null, 
+      verifiedOrganizer,
+      applicationStatus: user.application?.status ?? null,
+    });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Error al obtener el perfil' });
