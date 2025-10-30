@@ -85,14 +85,25 @@ export async function adminListOrganizerApplications(req: Request, res: Response
  * - Marca la solicitud como APPROVED
  * - Actualiza al usuario:
  *   role='organizer', isActive=true, isVerified=true, canSell=true
+ * - Crea/actualiza ConnectedAccount con los datos bancarios de la solicitud
  */
 export async function adminApproveOrganizerApplication(req: Request, res: Response) {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: "ID inválido" });
 
+  // Obtener la solicitud completa con todos los datos bancarios
   const app = await prisma.organizerApplication.findUnique({
     where: { id },
-    select: { id: true, status: true, userId: true },
+    select: {
+      id: true,
+      status: true,
+      userId: true,
+      payoutBankName: true,
+      payoutAccountType: true,
+      payoutAccountNumber: true,
+      payoutHolderName: true,
+      payoutHolderRut: true,
+    },
   });
   if (!app) return res.status(404).json({ error: "Solicitud no encontrada" });
 
@@ -100,19 +111,23 @@ export async function adminApproveOrganizerApplication(req: Request, res: Respon
     return res.status(200).json({ ok: true, message: "La solicitud ya estaba aprobada." });
   }
 
-  const [updatedApp, updatedUser] = await prisma.$transaction([
-    prisma.organizerApplication.update({
+  // Usar transacción para actualizar todo de forma atómica
+  const result = await prisma.$transaction(async (tx) => {
+    // 1. Actualizar la solicitud
+    const updatedApp = await tx.organizerApplication.update({
       where: { id },
       data: { status: "APPROVED" },
       select: { id: true, status: true, updatedAt: true },
-    }),
-    prisma.user.update({
+    });
+
+    // 2. Actualizar el usuario
+    const updatedUser = await tx.user.update({
       where: { id: app.userId },
       data: {
         role: "organizer",
-        isActive: true,     // ✅ activamos la cuenta por seguridad
-        isVerified: true,   // ✅ KYC verificado
-        canSell: true,      // ✅ puede vender (si prefieres manual, cambia a false)
+        isActive: true,
+        isVerified: true,
+        canSell: true,
       },
       select: {
         id: true,
@@ -123,14 +138,47 @@ export async function adminApproveOrganizerApplication(req: Request, res: Respon
         isVerified: true,
         canSell: true,
       },
-    }),
-  ]);
+    });
+
+    // 3. Crear o actualizar ConnectedAccount con los datos bancarios
+    const connectedAccount = await tx.connectedAccount.upsert({
+      where: { userId: app.userId },
+      create: {
+        userId: app.userId,
+        psp: "LOCAL", // PSP por defecto (igual que en payments.connectedAccount.controller)
+        pspAccountId: `LOCAL-${app.userId}`, // ID local
+        payoutsEnabled: true, // Habilitar pagos automáticamente
+        payoutBankName: app.payoutBankName,
+        payoutAccountType: app.payoutAccountType,
+        payoutAccountNumber: app.payoutAccountNumber,
+        payoutHolderName: app.payoutHolderName,
+        payoutHolderRut: app.payoutHolderRut,
+      },
+      update: {
+        payoutsEnabled: true, // Habilitar pagos si ya existía
+        payoutBankName: app.payoutBankName,
+        payoutAccountType: app.payoutAccountType,
+        payoutAccountNumber: app.payoutAccountNumber,
+        payoutHolderName: app.payoutHolderName,
+        payoutHolderRut: app.payoutHolderRut,
+      },
+      select: {
+        id: true,
+        payoutsEnabled: true,
+        payoutBankName: true,
+        payoutAccountType: true,
+      },
+    });
+
+    return { updatedApp, updatedUser, connectedAccount };
+  });
 
   res.json({
     ok: true,
-    message: "Solicitud aprobada",
-    application: updatedApp,
-    user: updatedUser,
+    message: "Solicitud aprobada y cuenta de cobro configurada",
+    application: result.updatedApp,
+    user: result.updatedUser,
+    connectedAccount: result.connectedAccount,
   });
 }
 
