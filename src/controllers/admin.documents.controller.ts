@@ -33,14 +33,11 @@ export async function getDocument(req: Request, res: Response, next: any) {
     // prevenir path traversal attacks
     const normalized = path.normalize(filename).replace(/^(\.\.(\/|\\|$))+/, '');
     
-    // construir la ruta completa
-    const fullPath = path.join(process.cwd(), 'uploads', 'documents', normalized);
+    // construir la ruta completa usando UPLOADS_BASE (respeta env.UPLOAD_DIR)
+    const fullPath = path.join(UPLOADS_BASE, 'documents', normalized);
 
     // verificar que el archivo existe y está dentro del directorio permitido
-    const allowedBase = path.join(process.cwd(), 'uploads', 'documents');
-    if (!fullPath.startsWith(allowedBase)) {
-      return res.status(403).json({ error: 'Acceso denegado' });
-    }
+    const allowedBase = path.join(UPLOADS_BASE, 'documents');
     if (!fullPath.startsWith(allowedBase)) {
       return res.status(403).json({ error: 'Acceso denegado' });
     }
