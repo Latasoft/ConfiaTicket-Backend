@@ -1,16 +1,15 @@
 import { Router } from 'express';
 import { authenticateToken, authorizeRoles } from '../middleware/authMiddleware';
 import { upload } from '../middleware/upload.middleware';
-import { applyOrganizer } from '../controllers/organizerApplication.controller';
+import { applyOrganizer, getMyApplication } from '../controllers/organizerApplication.controller';
 
 const router = Router();
 
-router.post(
-  '/apply',
+// Obtener mi solicitud
+router.get(
+  '/my-application',
   authenticateToken,
-  authorizeRoles('buyer'), // solo compradores pueden solicitar
-  upload.single('idCardImage'), // campo del formulario
-  applyOrganizer
+  getMyApplication
 );
 
 // Buyer solicita ser organizador con foto de carnet (campo: idCardImage)
