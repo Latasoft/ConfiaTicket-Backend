@@ -16,6 +16,7 @@ import {
   downloadTicket,
   listReservationTickets,
   downloadIndividualTicket,
+  getGroupReservationTickets,
 } from "../controllers/bookings.controller";
 
 const router = Router();
@@ -33,6 +34,9 @@ router.post("/", authenticateToken, createBooking);
 
 /** Mis reservas */
 router.get("/my", authenticateToken, listMyBookings);
+
+/** Obtener todas las reservaciones de un grupo de compra */
+router.get("/group/:purchaseGroupId/tickets", authenticateToken, getGroupReservationTickets);
 
 /** Obtener una reserva específica */
 router.get("/:id", authenticateToken, getBooking);

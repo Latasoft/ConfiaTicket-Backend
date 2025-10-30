@@ -13,6 +13,7 @@ interface TicketData {
   buyerName: string;
   buyerEmail: string;
   seatAssignment?: string;
+  sectionName?: string;        // Nombre de la sección
   qrCode: string;
   reservationCode: string;
   ticketNumber?: number;      // Número del ticket (1 de 3, 2 de 3, etc.)
@@ -138,6 +139,16 @@ export async function generateTicketPDF(ticketData: TicketData): Promise<string>
 
     currentY += 35;
 
+    if (ticketData.sectionName) {
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#1f2937');
+      doc.text('Sección:', leftColumnX, currentY);
+
+      doc.fontSize(12).font('Helvetica-Bold').fillColor('#2563eb');
+      doc.text(ticketData.sectionName, leftColumnX, currentY + 15, { width: leftColumnWidth });
+
+      currentY += 40;
+    }
+
     if (ticketData.seatAssignment) {
       doc.fontSize(10).font('Helvetica-Bold').fillColor('#1f2937');
       doc.text('Asiento:', leftColumnX, currentY);
@@ -239,9 +250,6 @@ export async function generateTicketPDF(ticketData: TicketData): Promise<string>
     doc.fontSize(9).font('Helvetica').fillColor('#374151');
     const instructions = [
       '• Presenta este código QR al ingresar al evento',
-      '• Debe presentarse junto con un documento de identidad válido',
-      '• Esta entrada es personal e intransferible',
-      '• Conserve este ticket durante todo el evento',
     ];
 
     instructions.forEach((instruction) => {
@@ -250,7 +258,8 @@ export async function generateTicketPDF(ticketData: TicketData): Promise<string>
     });
 
     // ===================== FOOTER =====================
-    const footerY = doc.page.height - 60;
+    // Calcular posición del footer para que quede cerca de las instrucciones
+    const footerY = currentY + 20;
 
     doc
       .strokeColor('#e5e7eb')

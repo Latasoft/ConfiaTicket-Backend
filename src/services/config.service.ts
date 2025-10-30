@@ -42,8 +42,8 @@ async function refreshConfigCache() {
   };
 
   configCache.platformFee = {
-    FEE_BPS: platformFee?.feeBps ?? 0,
-    FEE_PERCENT: ((platformFee?.feeBps ?? 0) / 100).toFixed(2),
+    feeBps: platformFee?.feeBps ?? 0,
+    feePercent: ((platformFee?.feeBps ?? 0) / 100).toFixed(2),
   };
 
   configCache.fieldLimits = {};
@@ -86,7 +86,7 @@ export async function getPlatformFee() {
 
 export async function getPlatformFeeBps(): Promise<number> {
   await refreshConfigCache();
-  return configCache.platformFee?.FEE_BPS ?? 0;
+  return configCache.platformFee?.feeBps ?? 0;
 }
 
 export async function getFieldLimits() {

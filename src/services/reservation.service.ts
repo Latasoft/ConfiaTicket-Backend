@@ -26,6 +26,16 @@ export async function processReservationAfterPayment(reservationId: number): Pro
 
   const { event, buyer } = reservation;
 
+  // Cargar información de la sección si existe
+  let sectionName: string | undefined;
+  if (reservation.sectionId) {
+    const section = await prisma.eventSection.findUnique({
+      where: { id: reservation.sectionId },
+      select: { name: true },
+    });
+    sectionName = section?.name;
+  }
+
   // CASO 1: Evento OWN - Generar 1 PDF por cada ticket
   if (event.eventType === 'OWN') {
     // Parsear asientos si existen
@@ -49,6 +59,7 @@ export async function processReservationAfterPayment(reservationId: number): Pro
         buyerName: buyer.name,
         buyerEmail: buyer.email,
         seatAssignment: seatNumber,
+        sectionName,
         qrCode,
         reservationCode: reservation.code,
         ticketNumber,
@@ -104,6 +115,7 @@ export async function processReservationAfterPayment(reservationId: number): Pro
         buyerName: buyer.name,
         buyerEmail: buyer.email,
         seatAssignment: seatInfo,
+        sectionName, // Incluir sección si existe
         qrCode,
         reservationCode: reservation.code,
         ticketNumber: 1,

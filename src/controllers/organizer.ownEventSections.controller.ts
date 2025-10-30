@@ -1,6 +1,15 @@
 // src/controllers/organizer.ownEventSections.controller.ts
 // Este controlador solo maneja secciones de eventos propios (own)
 // Para eventos de reventa (resale), usar organizer.resaleTickets.controller.ts
+//
+// REGLAS DE CAPACIDAD:
+// 1. Capacidad de sección = suma de capacidades de sus filas
+//    Ejemplo: Fila A (10 asientos) + Fila B (10 asientos) = Sección (20)
+// 2. Suma de capacidades de secciones ≤ capacidad del evento
+//    Ejemplo: Sección VIP (20) + Sección General (20) ≤ Evento (40)
+// 3. Reservas por sección ≤ capacidad de la sección
+//    (Validado en bookings.controller.ts)
+//
 import { Request, Response } from 'express';
 import prisma from '../prisma/client';
 import { getFieldLimits } from '../services/config.service';
@@ -62,6 +71,62 @@ function toInt(val: unknown, def?: number): number | undefined {
 }
 
 /**
+ * Valida que la suma de capacidades de secciones no exceda la capacidad del evento
+ * @param eventId ID del evento
+ * @param newSectionCapacity Capacidad de la nueva sección o sección actualizada
+ * @param excludeSectionId ID de sección a excluir (para actualizaciones)
+ * @returns { valid: boolean, error?: object }
+ */
+async function validateEventCapacity(
+  eventId: number,
+  newSectionCapacity: number,
+  excludeSectionId?: number
+): Promise<{ valid: boolean; error?: any }> {
+  const event = await prisma.event.findUnique({
+    where: { id: eventId },
+    select: { capacity: true },
+  });
+
+  if (!event) {
+    return {
+      valid: false,
+      error: { error: 'Evento no encontrado' },
+    };
+  }
+
+  // Obtener la suma de capacidades de otras secciones
+  const otherSections = await prisma.eventSection.findMany({
+    where: {
+      eventId,
+      ...(excludeSectionId ? { id: { not: excludeSectionId } } : {}),
+    },
+    select: { totalCapacity: true },
+  });
+
+  const otherSectionsCapacity = otherSections.reduce((sum, s) => sum + s.totalCapacity, 0);
+  const totalCapacity = otherSectionsCapacity + newSectionCapacity;
+
+  if (totalCapacity > event.capacity) {
+    return {
+      valid: false,
+      error: {
+        error: 'La suma de las capacidades de todas las secciones excede la capacidad del evento',
+        details: {
+          eventCapacity: event.capacity,
+          existingSectionsCapacity: otherSectionsCapacity,
+          newSectionCapacity,
+          totalAfterChange: totalCapacity,
+          exceededBy: totalCapacity - event.capacity,
+          available: Math.max(0, event.capacity - otherSectionsCapacity),
+        },
+      },
+    };
+  }
+
+  return { valid: true };
+}
+
+/**
  * POST /api/organizer/events/:eventId/sections
  * Crear sección para evento OWN
  */
@@ -105,14 +170,17 @@ export async function createSection(req: Request, res: Response) {
     errors.push(`name excede ${FIELD_LIMITS.TICKET_SECTION} caracteres`);
   }
 
-  // Calcular capacidad total
+  // Calcular capacidad total de la sección
+  // Regla: Capacidad = número de filas × asientos por fila
+  // O bien: Capacidad = rango de asientos (seatEnd - seatStart + 1)
   let totalCapacity = 0;
   const _seatsPerRow = toInt(seatsPerRow);
   const _seatStart = toInt(seatStart);
   const _seatEnd = toInt(seatEnd);
 
   if (_seatsPerRow && _seatsPerRow > 0) {
-    // Si se especifica rowStart y rowEnd, calcular filas
+    // Modo: filas con asientos por fila
+    // Ejemplo: Fila A a Fila B, 10 asientos por fila = 2 × 10 = 20
     const _rowStart = toStr(rowStart);
     const _rowEnd = toStr(rowEnd);
     
@@ -137,6 +205,12 @@ export async function createSection(req: Request, res: Response) {
 
   if (errors.length) {
     return res.status(400).json({ error: 'Datos invalidos', details: errors });
+  }
+
+  // Validar que la suma de capacidades de todas las secciones no exceda la capacidad del evento
+  const validation = await validateEventCapacity(eventId, totalCapacity);
+  if (!validation.valid) {
+    return res.status(400).json(validation.error);
   }
 
   const section = await prisma.eventSection.create({
@@ -271,6 +345,7 @@ export async function updateSection(req: Request, res: Response) {
   }
 
   // Recalcular capacidad si cambió algo relevante
+  // Regla: Capacidad de sección = suma de capacidades de sus filas
   if (
     seatsPerRow !== undefined ||
     rowStart !== undefined ||
@@ -304,6 +379,12 @@ export async function updateSection(req: Request, res: Response) {
 
     if (totalCapacity > 0) {
       data.totalCapacity = totalCapacity;
+      
+      // Validar que la suma de capacidades no exceda la capacidad del evento
+      const validation = await validateEventCapacity(eventId, totalCapacity, sectionId);
+      if (!validation.valid) {
+        return res.status(400).json(validation.error);
+      }
     }
   }
 

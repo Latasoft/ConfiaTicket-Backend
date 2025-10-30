@@ -69,13 +69,73 @@ router.get(
 router.get('/:id/sections', async (req, res) => {
   try {
     const eventId = Number(req.params.id);
-    const sections = await (await import('../prisma/client')).default.eventSection.findMany({
+    console.log('🔍 [DEBUG] GET /events/:id/sections - eventId:', eventId);
+    
+    const prismaClient = (await import('../prisma/client')).default;
+    
+    // Verificar que el evento exista y su tipo
+    const event = await prismaClient.event.findUnique({
+      where: { id: eventId },
+      select: { id: true, title: true, eventType: true }
+    });
+    
+    console.log('🔍 [DEBUG] Evento encontrado:', event);
+    
+    const sections = await prismaClient.eventSection.findMany({
       where: { eventId },
       orderBy: { createdAt: 'asc' },
     });
-    res.json(sections);
+    
+    console.log('🔍 [DEBUG] Secciones encontradas:', sections.length);
+    
+    // Calcular asientos disponibles por sección
+    const now = new Date();
+    const HOLD_MS = 15 * 60 * 1000; // 15 minutos
+    
+    const sectionsWithAvailability = await Promise.all(
+      sections.map(async (section) => {
+        // Contar reservas activas (pagadas o pendientes dentro del hold)
+        const reservedInSection = await prismaClient.reservation.aggregate({
+          where: {
+            eventId,
+            sectionId: section.id,
+            status: { in: ['PAID', 'PENDING_PAYMENT'] },
+            // Solo contar pendientes que aún están en hold
+            OR: [
+              { status: 'PAID' },
+              { 
+                status: 'PENDING_PAYMENT',
+                expiresAt: { gt: now },
+                createdAt: { gt: new Date(now.getTime() - HOLD_MS) }
+              }
+            ]
+          },
+          _sum: { quantity: true },
+        });
+        
+        const reserved = reservedInSection._sum.quantity || 0;
+        const available = Math.max(0, section.totalCapacity - reserved);
+        
+        return {
+          ...section,
+          reserved,
+          available,
+        };
+      })
+    );
+    
+    console.log('🔍 [DEBUG] Secciones con disponibilidad:', 
+      sectionsWithAvailability.map(s => ({ 
+        name: s.name, 
+        total: s.totalCapacity, 
+        reserved: s.reserved, 
+        available: s.available 
+      }))
+    );
+    
+    res.json(sectionsWithAvailability);
   } catch (err) {
-    console.error(err);
+    console.error('❌ [ERROR] Error al obtener secciones:', err);
     res.status(500).json({ error: 'Error al obtener secciones' });
   }
 });

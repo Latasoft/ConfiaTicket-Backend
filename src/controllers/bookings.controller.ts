@@ -3,7 +3,7 @@ import { Request, Response } from "express";
 import prisma from "../prisma/client";
 import { Prisma } from "@prisma/client";
 import { processReservationAfterPayment } from "../services/reservation.service";
-import { getTicketLimits } from "../services/config.service";
+import { getTicketLimits, getPlatformFeeBps } from "../services/config.service";
 import crypto from "crypto";
 
 type Authed = Request & { user?: { id: number; role: string; verifiedOrganizer?: boolean } };
@@ -169,29 +169,6 @@ export async function holdReservation(req: Authed, res: Response) {
                 throw e;
               }
 
-              // Validar capacidad de la sección
-              const reservedInSection = await tx.reservation.aggregate({
-                where: {
-                  eventId,
-                  sectionId: section.sectionId,
-                  status: { in: ['PENDING_PAYMENT', 'PAID'] },
-                },
-                _sum: { quantity: true },
-              });
-
-              const sectionReserved = reservedInSection._sum.quantity || 0;
-              const sectionAvailable = eventSection.totalCapacity - sectionReserved;
-
-              if (sectionAvailable < section.quantity) {
-                const e = new Error("SECTION_INSUFFICIENT_STOCK") as any;
-                e.status = 409;
-                e.sectionId = section.sectionId;
-                e.sectionName = eventSection.name;
-                e.available = sectionAvailable;
-                e.requested = section.quantity;
-                throw e;
-              }
-
               // Validar asientos específicos si se proporcionaron
               if (section.seats && section.seats.length > 0) {
                 if (section.seats.length !== section.quantity) {
@@ -232,6 +209,29 @@ export async function holdReservation(req: Authed, res: Response) {
                   e.conflictingSeats = conflictingSeats;
                   throw e;
                 }
+              } else {
+                // Solo validar capacidad general si NO se están seleccionando asientos específicos
+                const reservedInSection = await tx.reservation.aggregate({
+                  where: {
+                    eventId,
+                    sectionId: section.sectionId,
+                    status: { in: ['PENDING_PAYMENT', 'PAID'] },
+                  },
+                  _sum: { quantity: true },
+                });
+
+                const sectionReserved = reservedInSection._sum.quantity || 0;
+                const sectionAvailable = eventSection.totalCapacity - sectionReserved;
+
+                if (sectionAvailable < section.quantity) {
+                  const e = new Error("SECTION_INSUFFICIENT_STOCK") as any;
+                  e.status = 409;
+                  e.sectionId = section.sectionId;
+                  e.sectionName = eventSection.name;
+                  e.available = sectionAvailable;
+                  e.requested = section.quantity;
+                  throw e;
+                }
               }
             }
           }
@@ -264,11 +264,22 @@ export async function holdReservation(req: Authed, res: Response) {
         const expiresAt = new Date(Date.now() + HOLD_MINUTES * 60_000);
         const purchaseGroupId = crypto.randomUUID();
 
+        // Obtener comisión de la plataforma
+        const platformFeeBps = await getPlatformFeeBps();
+
         // Crear una reserva por cada sección
         const reservations = [];
         
         for (const section of sectionsToReserve) {
-          const amount = (ev.price ?? 0) * section.quantity;
+          // Calcular subtotal (precio base * cantidad)
+          const subtotal = (ev.price ?? 0) * section.quantity;
+          
+          // Calcular comisión de la plataforma
+          const platformFee = Math.round(subtotal * platformFeeBps / 10000);
+          
+          // Total = subtotal + comisión
+          const amount = subtotal + platformFee;
+          
           const seatAssignment = section.seats?.length 
             ? section.seats.join(', ') 
             : undefined;
@@ -804,7 +815,7 @@ export async function listReservationTickets(req: Authed, res: Response) {
     const reservation = await prisma.reservation.findUnique({
       where: { id },
       include: {
-        event: { select: { title: true, date: true, location: true, eventType: true } },
+        event: { select: { title: true, date: true, location: true, eventType: true, price: true } },
         generatedTickets: {
           orderBy: { ticketNumber: 'asc' },
         },
@@ -813,6 +824,15 @@ export async function listReservationTickets(req: Authed, res: Response) {
 
     if (!reservation) {
       return res.status(404).json({ error: "BOOKING_NOT_FOUND" });
+    }
+
+    // Cargar la sección si existe
+    let eventSection = null;
+    if (reservation.sectionId) {
+      eventSection = await prisma.eventSection.findUnique({
+        where: { id: reservation.sectionId },
+        select: { id: true, name: true },
+      });
     }
 
     // Solo el dueño o superadmin
@@ -834,6 +854,7 @@ export async function listReservationTickets(req: Authed, res: Response) {
         amount: reservation.amount,
         paidAt: reservation.paidAt,
         event: reservation.event,
+        section: eventSection,
       },
       tickets: reservation.generatedTickets.map(t => ({
         id: t.id,
@@ -842,10 +863,101 @@ export async function listReservationTickets(req: Authed, res: Response) {
         qrCode: t.qrCode,
         scanned: t.scanned,
         scannedAt: t.scannedAt,
+        section: eventSection,
       })),
     });
   } catch (err: any) {
     console.error("listReservationTickets error:", err);
+    return res.status(500).json({ error: "SERVER_ERROR" });
+  }
+}
+
+/** GET /api/bookings/group/:purchaseGroupId/tickets - Obtener todas las reservaciones de un grupo */
+export async function getGroupReservationTickets(req: Authed, res: Response) {
+  try {
+    const user = req.user;
+    if (!user) return res.status(401).json({ error: "UNAUTHENTICATED" });
+
+    const purchaseGroupId = req.params.purchaseGroupId;
+    if (!purchaseGroupId) return res.status(422).json({ error: "INVALID_PURCHASE_GROUP_ID" });
+
+    console.log('🔍 [DEBUG] getGroupReservationTickets - purchaseGroupId:', purchaseGroupId);
+
+    const reservations = await prisma.reservation.findMany({
+      where: { purchaseGroupId },
+      include: {
+        event: { select: { title: true, date: true, location: true, eventType: true, price: true } },
+        generatedTickets: {
+          orderBy: { ticketNumber: 'asc' },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    if (reservations.length === 0) {
+      return res.status(404).json({ error: "NO_RESERVATIONS_FOUND" });
+    }
+
+    // Cargar todas las secciones necesarias
+    const sectionIds = reservations
+      .map(r => r.sectionId)
+      .filter((id): id is number => id !== null);
+    
+    const sections = sectionIds.length > 0 ? await prisma.eventSection.findMany({
+      where: { id: { in: sectionIds } },
+      select: { id: true, name: true },
+    }) : [];
+
+    // Crear un mapa de secciones para acceso rápido
+    const sectionsMap = new Map(sections.map(s => [s.id, s]));
+
+    // Verificar que el usuario es dueño de al menos una reservación
+    const isSuper = user.role === "superadmin";
+    const isOwner = reservations.some(r => r.buyerId === user.id);
+    
+    if (!isSuper && !isOwner) {
+      return res.status(403).json({ error: "FORBIDDEN_NOT_OWNER" });
+    }
+
+    // Todas las reservaciones deben estar pagadas
+    const allPaid = reservations.every(r => r.status === "PAID");
+    if (!allPaid) {
+      return res.status(400).json({ error: "NOT_ALL_RESERVATIONS_PAID" });
+    }
+
+    // Recopilar todos los tickets de todas las reservaciones con información de sección
+    const allTickets = reservations.flatMap(r => {
+      const section = r.sectionId ? sectionsMap.get(r.sectionId) || null : null;
+      return r.generatedTickets.map(t => ({
+        id: t.id,
+        reservationId: r.id,
+        ticketNumber: t.ticketNumber,
+        seatNumber: t.seatNumber,
+        qrCode: t.qrCode,
+        scanned: t.scanned,
+        scannedAt: t.scannedAt,
+        section: section,
+      }));
+    });
+
+    return res.json({
+      reservations: reservations.map(r => {
+        const section = r.sectionId ? sectionsMap.get(r.sectionId) || null : null;
+        return {
+          id: r.id,
+          code: r.code,
+          status: r.status,
+          quantity: r.quantity,
+          amount: r.amount,
+          paidAt: r.paidAt,
+          event: r.event,
+          section: section,
+        };
+      }),
+      tickets: allTickets,
+    });
+  } catch (err: any) {
+    console.error("getGroupReservationTickets error:", err);
     return res.status(500).json({ error: "SERVER_ERROR" });
   }
 }
