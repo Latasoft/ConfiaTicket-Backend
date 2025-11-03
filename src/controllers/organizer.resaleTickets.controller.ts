@@ -7,6 +7,7 @@ import { getFieldLimits } from '../services/config.service';
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
+import { extractQrFromImage } from '../services/qrExtractor.service';
 
 type Authed = { id: number; role: string };
 
@@ -123,6 +124,25 @@ export async function createTicket(req: Request, res: Response) {
   const fileBuffer = await fs.readFile(file.path);
   const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
 
+  // Extraer QR de la imagen original
+  console.log('Extrayendo QR del ticket original...');
+  let originalQrCode: string | null = null;
+  try {
+    originalQrCode = await extractQrFromImage(file.path);
+    if (originalQrCode) {
+      console.log('QR extraído exitosamente');
+    } else {
+      console.log('No se pudo extraer QR, continuando sin QR original');
+    }
+  } catch (qrError) {
+    console.error('Error al extraer QR:', qrError);
+    // No bloqueamos la creación del ticket si falla la extracción
+  }
+
+  // Generar QR proxy único (UUID)
+  const proxyQrCode = crypto.randomUUID();
+  console.log('QR Proxy generado:', proxyQrCode);
+
   try {
     const ticket = await prisma.ticket.create({
       data: {
@@ -136,6 +156,9 @@ export async function createTicket(req: Request, res: Response) {
         imageFileName: file.originalname,
         imageMime: file.mimetype,
         imageChecksum: checksum,
+        originalQrCode: originalQrCode || null,
+        proxyQrCode,
+        scannedCount: 0,
       },
     });
 

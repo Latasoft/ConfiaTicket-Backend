@@ -126,6 +126,15 @@ model Ticket {
   imageMime     String    @db.VarChar(127)
   imageChecksum String?   @db.VarChar(64)
 
+  // QR del ticket original y QR proxy para validacion
+  originalQrCode String?   @db.VarChar(500)   // QR extraido de la imagen original
+  proxyQrCode    String?   @unique @db.VarChar(100)  // UUID unico para proxy (link de validacion)
+  
+  // Tracking de escaneos del QR proxy
+  scannedCount   Int       @default(0)         // Contador de veces que se escaneo el QR proxy
+  lastScannedAt  DateTime?                     // Ultima vez que se escaneo
+  scannedLogs    Json?                         // Historial de escaneos [{timestamp, ip, userAgent, location}]
+
   // Estado de venta
   sold          Boolean   @default(false)
   soldAt        DateTime?
@@ -138,6 +147,7 @@ model Ticket {
   updatedAt     DateTime  @updatedAt @default(now())
 
   @@index([eventId, sold])
+  @@index([proxyQrCode])
   @@unique([eventId, ticketCode])
 }
 

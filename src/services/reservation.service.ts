@@ -1,6 +1,7 @@
 // src/services/reservation.service.ts
 import prisma from '../prisma/client';
 import { generateQRCode, generateTicketPDF } from './ticketPdf.service';
+import { generateResaleTicketPDF } from './resaleTicketPdf.service';
 
 /**
  * Procesa una reserva después del pago exitoso
@@ -93,64 +94,72 @@ export async function processReservationAfterPayment(reservationId: number): Pro
     });
   }
 
-  // CASO 2: Evento RESALE - Generar PDF (lógica temporal similar a OWN)
+  // CASO 2: Evento RESALE - Generar PDF con QR proxy
   else if (event.eventType === 'RESALE') {
     // Buscar el ticket asociado a esta reserva
     const ticket = await prisma.ticket.findFirst({
       where: { reservationId },
     });
 
-    if (ticket) {
-      // Generar código QR único
-      const qrCode = await generateQRCode();
-
-      // Información del asiento desde el ticket original
-      const seatInfo = `Fila ${ticket.row}, Asiento ${ticket.seat}${ticket.zone ? ` - Zona ${ticket.zone}` : ''}`;
-
-      // Generar el PDF individual
-      const pdfPath = await generateTicketPDF({
-        eventName: event.title,
-        eventDate: event.date,
-        eventLocation: event.location,
-        buyerName: buyer.name,
-        buyerEmail: buyer.email,
-        seatAssignment: seatInfo,
-        sectionName, // Incluir sección si existe
-        qrCode,
-        reservationCode: reservation.code,
-        ticketNumber: 1,
-        totalTickets: 1,
-        totalAmount: reservation.amount,
-      });
-
-      // Crear registro del ticket generado
-      await prisma.generatedTicket.create({
-        data: {
-          reservationId: reservation.id,
-          ticketNumber: 1,
-          seatNumber: seatInfo,
-          qrCode,
-          pdfPath,
-        },
-      });
-
-      // Actualizar reserva con QR
-      await prisma.reservation.update({
-        where: { id: reservationId },
-        data: {
-          qrCode,
-        },
-      });
-
-      // Marcar ticket original como vendido
-      await prisma.ticket.update({
-        where: { id: ticket.id },
-        data: {
-          sold: true,
-          soldAt: new Date(),
-        },
-      });
+    if (!ticket) {
+      throw new Error('Ticket RESALE not found for reservation');
     }
+
+    if (!ticket.proxyQrCode) {
+      throw new Error('Ticket RESALE does not have proxy QR code');
+    }
+
+    // Generar el PDF con el QR proxy (NO el QR original)
+    const pdfPath = await generateResaleTicketPDF({
+      eventName: event.title,
+      eventDate: event.date,
+      eventLocation: event.location,
+      eventCity: event.city,
+      eventCommune: event.commune,
+      buyerName: buyer.name,
+      buyerEmail: buyer.email,
+      ticketCode: ticket.ticketCode,
+      row: ticket.row,
+      seat: ticket.seat,
+      zone: ticket.zone,
+      level: ticket.level,
+      proxyQrCode: ticket.proxyQrCode, // QR proxy, NO el original
+      reservationCode: reservation.code,
+      totalAmount: reservation.amount,
+      priceBase: event.priceBase,
+    });
+
+    // Crear registro del ticket generado con el QR proxy
+    const seatInfo = `${ticket.row}${ticket.seat}${ticket.zone ? ` - ${ticket.zone}` : ''}`;
+    
+    await prisma.generatedTicket.create({
+      data: {
+        reservationId: reservation.id,
+        ticketNumber: 1,
+        seatNumber: seatInfo,
+        qrCode: ticket.proxyQrCode, // Usar el proxy QR
+        pdfPath,
+      },
+    });
+
+    // Actualizar reserva con el QR proxy
+    await prisma.reservation.update({
+      where: { id: reservationId },
+      data: {
+        qrCode: ticket.proxyQrCode, // Guardar el proxy QR
+      },
+    });
+
+    // Marcar ticket original como vendido
+    await prisma.ticket.update({
+      where: { id: ticket.id },
+      data: {
+        sold: true,
+        soldAt: new Date(),
+      },
+    });
+
+    console.log(`Ticket RESALE procesado - Proxy QR: ${ticket.proxyQrCode}`);
   }
 }
 
