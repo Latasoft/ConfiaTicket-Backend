@@ -54,10 +54,11 @@ export async function createTicket(req: Request, res: Response) {
     });
   }
 
-  // El archivo debe ser cargado por el middleware multer
-  const file = (req as any).file;
-  if (!file) {
-    return res.status(400).json({ error: 'Se requiere imagen del ticket' });
+  // Archivo cargado por middleware multer (upload.single)
+  const ticketImageFile = (req as any).file as Express.Multer.File | undefined;
+
+  if (!ticketImageFile) {
+    return res.status(400).json({ error: 'Se requiere imagen del ticket (campo "file")' });
   }
 
   const {
@@ -105,38 +106,68 @@ export async function createTicket(req: Request, res: Response) {
     errors.push(`level excede ${FIELD_LIMITS.TICKET_LEVEL} caracteres`);
   }
 
-  if (_ticketCode) {
+  // Normalizar zone: convertir cadenas vacías a null para consistencia
+  const normalizedZone = _zone || null;
+
+  // Validar duplicados por (eventId, row, seat, zone)
+  // Esto permite el mismo asiento en diferentes zonas/secciones
+  if (_row && _seat) {
     const duplicate = await prisma.ticket.findFirst({
-      where: { eventId, ticketCode: _ticketCode },
+      where: { 
+        eventId, 
+        row: _row,
+        seat: _seat,
+        zone: normalizedZone,
+      },
     });
     if (duplicate) {
-      errors.push('Ya existe un ticket con ese codigo en este evento');
+      const zoneMsg = normalizedZone ? ` en la zona "${normalizedZone}"` : '';
+      errors.push(`Ya existe un ticket para fila "${_row}", asiento "${_seat}"${zoneMsg} en este evento`);
     }
   }
 
   if (errors.length) {
     // Eliminar archivo subido si hay errores
-    await fs.unlink(file.path).catch(() => {});
+    await fs.unlink(ticketImageFile.path).catch(() => {});
     return res.status(400).json({ error: 'Datos inválidos', details: errors });
   }
 
-  // Calcular checksum de la imagen
-  const fileBuffer = await fs.readFile(file.path);
+  // Calcular checksum de la imagen del ticket
+  const fileBuffer = await fs.readFile(ticketImageFile.path);
   const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
 
-  // Extraer QR de la imagen original
+  // Extraer QR de la imagen original (OBLIGATORIO)
   console.log('Extrayendo QR del ticket original...');
   let originalQrCode: string | null = null;
   try {
-    originalQrCode = await extractQrFromImage(file.path);
-    if (originalQrCode) {
-      console.log('QR extraído exitosamente');
-    } else {
-      console.log('No se pudo extraer QR, continuando sin QR original');
+    originalQrCode = await extractQrFromImage(ticketImageFile.path);
+    
+    if (!originalQrCode) {
+      // Si no se pudo extraer QR, eliminar el archivo y rechazar
+      await fs.unlink(ticketImageFile.path).catch(() => {});
+      return res.status(400).json({ 
+        error: 'No se pudo extraer el código QR de la imagen del ticket',
+        details: [
+          'La imagen debe contener un código QR válido y legible.',
+          'Asegúrate de que la imagen sea clara y el QR esté completamente visible.',
+          'Formatos aceptados: JPG, PNG con buena resolución.'
+        ]
+      });
     }
+    
+    console.log('✅ QR extraído exitosamente');
   } catch (qrError) {
-    console.error('Error al extraer QR:', qrError);
-    // No bloqueamos la creación del ticket si falla la extracción
+    console.error('❌ Error al extraer QR:', qrError);
+    // Eliminar el archivo subido si falla la extracción
+    await fs.unlink(ticketImageFile.path).catch(() => {});
+    return res.status(400).json({ 
+      error: 'Error al procesar la imagen del ticket',
+      details: [
+        'No se pudo leer el código QR de la imagen.',
+        'Verifica que la imagen no esté corrupta y contenga un QR válido.',
+        'Intenta con una imagen de mejor calidad o tomada desde otro ángulo.'
+      ]
+    });
   }
 
   // Generar QR proxy único (UUID)
@@ -150,11 +181,11 @@ export async function createTicket(req: Request, res: Response) {
         ticketCode: _ticketCode,
         row: _row,
         seat: _seat,
-        zone: _zone || null,
+        zone: normalizedZone,
         level: _level || null,
-        imageFilePath: file.path,
-        imageFileName: file.originalname,
-        imageMime: file.mimetype,
+        imageFilePath: ticketImageFile.path,
+        imageFileName: ticketImageFile.originalname,
+        imageMime: ticketImageFile.mimetype,
         imageChecksum: checksum,
         originalQrCode: originalQrCode || null,
         proxyQrCode,
@@ -163,10 +194,25 @@ export async function createTicket(req: Request, res: Response) {
     });
 
     return res.status(201).json(ticket);
-  } catch (error) {
-    // Si falla la creación, eliminar el archivo
-    await fs.unlink(file.path).catch(() => {});
-    throw error;
+  } catch (error: any) {
+    // Eliminar el archivo subido si falla la creación
+    await fs.unlink(ticketImageFile.path).catch(() => {});
+    
+    // Manejar error de constraint único
+    if (error?.code === 'P2002') {
+      const zoneMsg = normalizedZone ? ` en la zona "${normalizedZone}"` : '';
+      return res.status(400).json({ 
+        error: `Ya existe un ticket para fila "${_row}", asiento "${_seat}"${zoneMsg} en este evento`,
+        details: ['Por favor verifica que no hayas ingresado este ticket anteriormente']
+      });
+    }
+    
+    // Para otros errores, log en servidor pero mensaje genérico al cliente
+    console.error('Error creando ticket:', error);
+    return res.status(500).json({ 
+      error: 'Error al crear el ticket',
+      details: ['Ocurrió un error inesperado. Por favor intenta nuevamente.']
+    });
   }
 }
 
