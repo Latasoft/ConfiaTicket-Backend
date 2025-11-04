@@ -34,6 +34,7 @@ model User {
 
   events               Event[]       @relation("OrganizerEvents")
   reservations         Reservation[] @relation("ReservationBuyer")
+  claims               Claim[]       @relation("ClaimBuyer")
 
   application          OrganizerApplication?
 
@@ -88,6 +89,7 @@ model Event {
   reservations  Reservation[]
   tickets       Ticket[]
   sections      EventSection[]  // Para eventos OWN
+  claims        Claim[]         @relation("ClaimEvent")
 
   // (LEGADO) Datos bancarios por evento — se recomienda moverlos al perfil/PSP del organizador
   payoutBankName      String? @db.VarChar(80)
@@ -148,7 +150,7 @@ model Ticket {
 
   @@index([eventId, sold])
   @@index([proxyQrCode])
-  @@unique([eventId, ticketCode])
+  @@unique([eventId, row, seat, zone])
 }
 
 /* ===================== SECCIONES (Solo OWN) ===================== */
@@ -263,6 +265,9 @@ model Reservation {
 
   // 🔽 Inversa libro mayor
   ledgerEntries LedgerEntry[] @relation("ReservationLedger")
+  
+  // Reclamos
+  claim Claim? @relation("ClaimReservation")
 
   @@index([eventId])
   @@index([buyerId])
@@ -303,6 +308,115 @@ model GeneratedTicket {
   @@index([scanned])
 }
 
+/* ============ RECLAMOS ============ */
+
+enum ClaimReason {
+  TICKET_NOT_RECEIVED      // No recibí el ticket
+  TICKET_INVALID           // El ticket es inválido o falso
+  TICKET_DUPLICATED        // El ticket ya fue usado/vendido a otra persona
+  EVENT_CANCELLED          // El evento fue cancelado
+  EVENT_CHANGED            // El evento cambió de fecha/lugar
+  WRONG_SEATS              // Los asientos no corresponden
+  POOR_QUALITY             // La calidad del ticket es mala
+  OVERCHARGED              // Me cobraron de más
+  OTHER                    // Otro motivo
+}
+
+enum ClaimStatus {
+  PENDING          // Pendiente de revisión
+  IN_REVIEW        // En revisión por el equipo
+  WAITING_INFO     // Esperando información adicional del comprador
+  RESOLVED         // Resuelto favorablemente
+  REJECTED         // Rechazado
+  CANCELLED        // Cancelado por el comprador
+}
+
+enum ClaimPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model Claim {
+  id              Int           @id @default(autoincrement())
+  
+  // Relaciones
+  buyer           User          @relation("ClaimBuyer", fields: [buyerId], references: [id])
+  buyerId         Int
+  reservation     Reservation   @relation("ClaimReservation", fields: [reservationId], references: [id])
+  reservationId   Int
+  event           Event         @relation("ClaimEvent", fields: [eventId], references: [id])
+  eventId         Int
+  
+  // Datos del reclamo
+  reason          ClaimReason
+  description     String        @db.VarChar(2000)
+  status          ClaimStatus   @default(PENDING)
+  priority        ClaimPriority @default(MEDIUM)
+  
+  // Evidencia (URL única inicial - DEPRECADO, usar ClaimMessage)
+  attachmentUrl   String?       @db.VarChar(1024)
+  
+  // Respuesta del admin (DEPRECADO, usar ClaimMessage)
+  adminResponse   String?       @db.VarChar(2000)
+  reviewedBy      Int?          // ID del admin que revisó
+  reviewedAt      DateTime?
+  
+  // Resolución
+  resolution      String?       @db.VarChar(2000)  // Explicación de la resolución
+  resolvedAt      DateTime?
+  
+  // Reaperturas
+  reopenCount     Int           @default(0)
+  reopenedAt      DateTime?
+  canReopen       Boolean       @default(true)
+  
+  // Timestamps
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt @default(now())
+  
+  // Relación con mensajes/comentarios
+  messages        ClaimMessage[]
+  
+  @@index([buyerId])
+  @@index([reservationId])
+  @@index([eventId])
+  @@index([status])
+  @@index([priority])
+  @@index([createdAt])
+  @@unique([reservationId])  // Un solo reclamo por reserva
+}
+
+enum ClaimMessageType {
+  BUYER_MESSAGE    // Mensaje del comprador
+  BUYER_EVIDENCE   // Evidencia subida por el comprador
+  ADMIN_RESPONSE   // Respuesta del administrador
+  SYSTEM_NOTE      // Nota del sistema (cambio de estado, etc.)
+}
+
+model ClaimMessage {
+  id          Int               @id @default(autoincrement())
+  
+  claim       Claim             @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  claimId     Int
+  
+  type        ClaimMessageType
+  message     String?           @db.VarChar(2000)
+  
+  // Archivos adjuntos (múltiples URLs separadas por comas o JSON array)
+  attachments Json?             // Array de URLs: ["url1", "url2", ...]
+  
+  // Autor (puede ser comprador o admin)
+  authorId    Int?              // ID del usuario que escribió
+  authorRole  String?           @db.VarChar(20)  // 'buyer' o 'superadmin'
+  
+  createdAt   DateTime          @default(now())
+  
+  @@index([claimId])
+  @@index([createdAt])
+}
+
 /* ============ SOLICITUD ORGANIZADOR ============ */
 
 enum ApplicationStatus {
@@ -319,6 +433,7 @@ model OrganizerApplication {
   phone        String?           @db.VarChar(30)
   notes        String?           @db.Text
   idCardImage  String            @db.VarChar(1024)
+  idCardImageBack String         @db.VarChar(1024)
   status       ApplicationStatus @default(PENDING)
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt

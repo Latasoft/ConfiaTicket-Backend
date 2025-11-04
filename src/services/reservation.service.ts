@@ -2,11 +2,17 @@
 import prisma from '../prisma/client';
 import { generateQRCode, generateTicketPDF } from './ticketPdf.service';
 import { generateResaleTicketPDF } from './resaleTicketPdf.service';
+import { 
+  sendPurchaseConfirmationEmail, 
+  sendPurchaseNotificationToAdmin 
+} from './email.service';
+import { env } from '../config/env';
 
 /**
  * Procesa una reserva después del pago exitoso
  * - Para eventos OWN: genera 1 PDF por cada ticket comprado
  * - Para eventos RESALE: marca el ticket como vendido
+ * - Envía emails de confirmación
  */
 export async function processReservationAfterPayment(reservationId: number): Promise<void> {
   const reservation = await prisma.reservation.findUnique({
@@ -160,6 +166,40 @@ export async function processReservationAfterPayment(reservationId: number): Pro
     });
 
     console.log(`Ticket RESALE procesado - Proxy QR: ${ticket.proxyQrCode}`);
+  }
+
+  // ============ ENVÍO DE EMAILS ============
+  // Enviar email de confirmación al comprador
+  try {
+    await sendPurchaseConfirmationEmail({
+      buyerEmail: buyer.email,
+      buyerName: buyer.name,
+      eventTitle: event.title,
+      eventDate: event.date,
+      eventLocation: event.location,
+      quantity: reservation.quantity,
+      totalAmount: reservation.amount,
+      reservationCode: reservation.code,
+      reservationId: reservation.id,
+    });
+  } catch (emailError: any) {
+    console.error('❌ Error enviando email de confirmación:', emailError.message);
+    // No fallar el proceso si falla el email
+  }
+
+  // Enviar notificación al admin
+  try {
+    await sendPurchaseNotificationToAdmin({
+      buyerName: buyer.name,
+      buyerEmail: buyer.email,
+      eventTitle: event.title,
+      quantity: reservation.quantity,
+      totalAmount: reservation.amount,
+      reservationId: reservation.id,
+    });
+  } catch (emailError: any) {
+    console.error('❌ Error enviando notificación a admin:', emailError.message);
+    // No fallar el proceso si falla el email
   }
 }
 
