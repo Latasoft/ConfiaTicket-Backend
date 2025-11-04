@@ -8,6 +8,7 @@ const router = Router();
 // CRUD de secciones para eventos OWN
 router.post('/events/:eventId/sections', sectionsCtrl.createSection);
 router.get('/events/:eventId/sections', sectionsCtrl.listSections);
+router.get('/events/:eventId/sections/status', sectionsCtrl.getSectionsStatus); // Verificar completitud
 router.get('/events/:eventId/sections/:sectionId', sectionsCtrl.getSection);
 router.put('/events/:eventId/sections/:sectionId', sectionsCtrl.updateSection);
 router.delete('/events/:eventId/sections/:sectionId', sectionsCtrl.deleteSection);

@@ -425,3 +425,74 @@ export async function deleteSection(req: Request, res: Response) {
 
   res.status(204).send();
 }
+
+/**
+ * Helper: Verifica si un evento OWN tiene todas sus secciones completas
+ * @param eventId ID del evento
+ * @returns { complete: boolean, eventCapacity: number, sectionsCapacity: number, missingCapacity: number }
+ */
+export async function checkEventSectionsComplete(eventId: number) {
+  const event = await prisma.event.findUnique({
+    where: { id: eventId },
+    select: { capacity: true, eventType: true },
+  });
+
+  if (!event) {
+    return null;
+  }
+
+  // Para eventos RESALE, verificar tickets en lugar de secciones
+  if (event.eventType === 'RESALE') {
+    const ticketsCount = await prisma.ticket.count({
+      where: { eventId },
+    });
+    
+    return {
+      complete: ticketsCount === event.capacity,
+      eventCapacity: event.capacity,
+      sectionsCapacity: ticketsCount,
+      missingCapacity: Math.max(0, event.capacity - ticketsCount),
+    };
+  }
+
+  // Para eventos OWN, verificar secciones
+  const sections = await prisma.eventSection.findMany({
+    where: { eventId },
+    select: { totalCapacity: true },
+  });
+
+  const sectionsCapacity = sections.reduce((sum, s) => sum + s.totalCapacity, 0);
+  const missingCapacity = Math.max(0, event.capacity - sectionsCapacity);
+
+  return {
+    complete: sectionsCapacity === event.capacity,
+    eventCapacity: event.capacity,
+    sectionsCapacity,
+    missingCapacity,
+  };
+}
+
+/**
+ * GET /api/organizer/events/:eventId/sections/status
+ * Verificar si el evento tiene todas sus secciones completas
+ */
+export async function getSectionsStatus(req: Request, res: Response) {
+  const user = (req as any).user as Authed;
+  const eventId = Number(req.params.eventId);
+
+  const event = await prisma.event.findFirst({
+    where: { id: eventId, organizerId: user.id },
+  });
+
+  if (!event) {
+    return res.status(404).json({ error: 'Evento no encontrado' });
+  }
+
+  const status = await checkEventSectionsComplete(eventId);
+
+  if (!status) {
+    return res.status(404).json({ error: 'Evento no encontrado' });
+  }
+
+  res.json(status);
+}
