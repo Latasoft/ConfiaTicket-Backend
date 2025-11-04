@@ -156,6 +156,7 @@ export async function adminGetUser(req: Request, res: Response) {
           taxId: true,
           phone: true,
           idCardImage: true,
+          idCardImageBack: true,
           notes: true,
           status: true,
           createdAt: true,
@@ -256,11 +257,14 @@ export async function adminGetUser(req: Request, res: Response) {
 
   res.json({
     ...user,
-    // incluir la url completa de idCardImage si existe
+    // incluir las URLs completas de las imágenes de cédula si existen
     application: user.application ? {
       ...user.application,
       idCardImageUrl: user.application.idCardImage 
         ? `/api/admin/documents/${user.application.idCardImage}`
+        : null,
+      idCardImageBackUrl: user.application.idCardImageBack 
+        ? `/api/admin/documents/${user.application.idCardImageBack}`
         : null,
     } : null,
     stats: {

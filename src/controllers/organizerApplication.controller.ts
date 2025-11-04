@@ -17,6 +17,12 @@ export async function applyOrganizer(req: Request, res: Response) {
       return res.status(401).json({ error: 'No autenticado' });
     }
 
+    // DEBUG: Log de archivos recibidos
+    console.log('=== DEBUG ORGANIZER APPLICATION ===');
+    console.log('req.files:', (req as any).files);
+    console.log('req.file:', (req as any).file);
+    console.log('req.body:', req.body);
+
     const { 
       legalName, 
       phone, 
@@ -40,9 +46,26 @@ export async function applyOrganizer(req: Request, res: Response) {
       return res.status(400).json({ error: 'Todos los datos bancarios son obligatorios' });
     }
 
-    const file = (req as any).file as UploadedFile | undefined;
-    if (!file) {
-      return res.status(400).json({ error: 'Archivo requerido (idCardImage)' });
+        // Manejar archivos múltiples (idCardImage frontal y idCardImageBack trasera - AMBAS OBLIGATORIAS)
+    const files = (req as any).files as { [fieldname: string]: UploadedFile[] } | undefined;
+    
+    if (!files || !files.idCardImage || files.idCardImage.length === 0) {
+      return res.status(400).json({ error: 'La imagen frontal de la cédula es requerida (idCardImage)' });
+    }
+
+    if (!files.idCardImageBack || files.idCardImageBack.length === 0) {
+      return res.status(400).json({ error: 'La imagen trasera de la cédula es requerida (idCardImageBack)' });
+    }
+
+    const frontFile = files.idCardImage[0];
+    const backFile = files.idCardImageBack[0];
+
+    if (!frontFile) {
+      return res.status(400).json({ error: 'Error procesando la imagen frontal de la cédula' });
+    }
+
+    if (!backFile) {
+      return res.status(400).json({ error: 'Error procesando la imagen trasera de la cédula' });
     }
 
     // Obtener el usuario para usar su RUT
@@ -55,8 +78,9 @@ export async function applyOrganizer(req: Request, res: Response) {
       return res.status(400).json({ error: 'Usuario no tiene RUT registrado. Por favor, actualiza tu perfil con tu RUT.' });
     }
 
-    // extraer solo el nombre del archivo
-    const filename = path.basename(file.path);
+    // extraer solo el nombre de los archivos
+    const frontFilename = path.basename(frontFile.path);
+    const backFilename = path.basename(backFile.path);
 
     // Evitar que un usuario envíe más de una solicitud si tiene una PENDIENTE o APROBADA
     const existing = await prisma.organizerApplication.findUnique({
@@ -64,6 +88,7 @@ export async function applyOrganizer(req: Request, res: Response) {
       select: {
         status: true,
         idCardImage: true, // Necesitamos el nombre del archivo anterior
+        idCardImageBack: true,
       },
     });
 
@@ -89,7 +114,8 @@ export async function applyOrganizer(req: Request, res: Response) {
             taxId: user.rut,
             phone: phone.trim(),
             notes: notes?.trim() || null,
-            idCardImage: filename,
+            idCardImage: frontFilename,
+            idCardImageBack: backFilename,
             payoutBankName,
             payoutAccountType,
             payoutAccountNumber,
@@ -98,8 +124,8 @@ export async function applyOrganizer(req: Request, res: Response) {
             status: 'PENDING',
           },
         }).then(async (app) => {
-          // Eliminar el archivo anterior si existe y es diferente del nuevo
-          if (existing.idCardImage && existing.idCardImage !== filename) {
+          // Eliminar los archivos anteriores si existen y son diferentes de los nuevos
+          if (existing.idCardImage && existing.idCardImage !== frontFilename) {
             const oldFilePath = path.join(process.cwd(), 'uploads', 'documents', existing.idCardImage);
             try {
               if (fs.existsSync(oldFilePath)) {
@@ -111,6 +137,17 @@ export async function applyOrganizer(req: Request, res: Response) {
               // No falla la operación por esto
             }
           }
+          if (existing.idCardImageBack && existing.idCardImageBack !== backFilename) {
+            const oldFilePath = path.join(process.cwd(), 'uploads', 'documents', existing.idCardImageBack);
+            try {
+              if (fs.existsSync(oldFilePath)) {
+                fs.unlinkSync(oldFilePath);
+                console.log(`Archivo anterior eliminado: ${existing.idCardImageBack}`);
+              }
+            } catch (err) {
+              console.error(`Error eliminando archivo anterior: ${existing.idCardImageBack}`, err);
+            }
+          }
           return app;
         })
       : await prisma.organizerApplication.create({
@@ -120,7 +157,8 @@ export async function applyOrganizer(req: Request, res: Response) {
             taxId: user.rut,
             phone: phone.trim(),
             notes: notes?.trim() || null,
-            idCardImage: filename,
+            idCardImage: frontFilename,
+            idCardImageBack: backFilename,
             payoutBankName,
             payoutAccountType,
             payoutAccountNumber,

@@ -12,12 +12,15 @@ router.get(
   getMyApplication
 );
 
-// Buyer solicita ser organizador con foto de carnet (campo: idCardImage)
+// Buyer solicita ser organizador con foto de carnet (campos: idCardImage, idCardImageBack)
 router.post(
   '/apply',
   authenticateToken,
   authorizeRoles('buyer'),
-  upload.single('idCardImage'),
+  upload.fields([
+    { name: 'idCardImage', maxCount: 1 },
+    { name: 'idCardImageBack', maxCount: 1 }
+  ]),
   applyOrganizer
 );
 
