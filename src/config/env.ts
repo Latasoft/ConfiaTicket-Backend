@@ -65,6 +65,7 @@ export const env = {
   SMTP_USER: process.env.SMTP_USER,
   SMTP_PASS: process.env.SMTP_PASS,
   MAIL_FROM: process.env.MAIL_FROM,
+  ADMIN_NOTIFICATION_EMAIL: process.env.ADMIN_NOTIFICATION_EMAIL,
 
   /* ===== URLs App ===== */
   FRONTEND_URL: FRONTEND_URL_RAW,

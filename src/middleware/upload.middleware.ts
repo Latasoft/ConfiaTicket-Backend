@@ -15,8 +15,9 @@ const uploadsRoot =
 
 /** Subcarpetas específicas */
 const uploadsDirs = {
-  documents: path.join(uploadsRoot, 'documents'),
-  tickets: path.join(uploadsRoot, 'tickets'),
+  documents: path.join(uploadsRoot, 'documents'), // Para documentos de identidad (KYC)
+  claims: path.join(uploadsRoot, 'claims'),       // Para evidencia de reclamos
+  tickets: path.join(uploadsRoot, 'tickets'),     // Para tickets de reventa
 };
 
 // Asegura existencia de carpetas
@@ -77,17 +78,36 @@ const allowTicketMimes = makeMimeFilter(
 
 /** ====== Uploaders ====== */
 
-/** Uploader para DOCUMENTOS (verificación/KYC) */
+/** Uploader para DOCUMENTOS DE IDENTIDAD (verificación/KYC) */
 export const upload = multer({
   storage: makeStorage('documents'),
-  limits: { fileSize: BASE_MAX_BYTES },
+  limits: { 
+    fileSize: BASE_MAX_BYTES,
+    files: 10, // Número máximo de archivos
+    fields: 20, // Número máximo de campos no-archivo
+  },
+  fileFilter: allowDocumentMimes,
+});
+
+/** Uploader para EVIDENCIA DE RECLAMOS */
+export const uploadClaims = multer({
+  storage: makeStorage('claims'),
+  limits: { 
+    fileSize: BASE_MAX_BYTES,
+    files: 5, // Máximo 5 archivos de evidencia
+    fields: 20,
+  },
   fileFilter: allowDocumentMimes,
 });
 
 /** Uploader para TICKETS (reventa/escrow) */
 export const uploadTickets = multer({
   storage: makeStorage('tickets'),
-  limits: { fileSize: TICKET_MAX_BYTES },
+  limits: { 
+    fileSize: TICKET_MAX_BYTES,
+    files: 10,
+    fields: 20,
+  },
   fileFilter: allowTicketMimes,
 });
 
@@ -96,6 +116,7 @@ export function getUploadsPaths() {
   return {
     root: uploadsRoot,
     documents: uploadsDirs.documents,
+    claims: uploadsDirs.claims,
     tickets: uploadsDirs.tickets,
   };
 }

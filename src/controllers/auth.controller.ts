@@ -117,9 +117,10 @@ function parseBirthDate(input: string): Date | null {
     const [, yStr, moStr, dStr] = m;
     if (!yStr || !moStr || !dStr) return null;
     const y = Number(yStr);
-    const mo = Number(moStr) - 1;
+    const mo = Number(moStr);
     const d = Number(dStr);
-    const dt = new Date(Date.UTC(y, mo, d));
+    // crear fecha en UTC a las 12:00
+    const dt = new Date(Date.UTC(y, mo - 1, d, 12, 0, 0, 0));
     if (!Number.isNaN(dt.getTime())) return dt;
   }
 
@@ -242,8 +243,7 @@ export async function register(req: Request, res: Response) {
         rut: normRut,
         password: hashed,
         role, // 'buyer' u 'organizer' (superadmin bloqueado arriba)
-        // Si agregaste birthDate en Prisma, puedes guardar:
-        // birthDate: dob,
+        birthDate: dob
       },
       select: {
         id: true,
@@ -387,13 +387,25 @@ export async function me(req: Request, res: Response) {
         isVerified: true,
         canSell: true,
         rut: true,
+        application: {
+          select: {
+            status: true,
+          },
+        },
       },
     });
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
     const verifiedOrganizer = user.role === 'organizer' && user.isVerified === true && user.canSell === true;
 
-    return res.json({ id: user.id, name: user.name, role: user.role, rut: user.rut ?? null, verifiedOrganizer });
+    return res.json({ 
+      id: user.id, 
+      name: user.name, 
+      role: user.role, 
+      rut: user.rut ?? null, 
+      verifiedOrganizer,
+      applicationStatus: user.application?.status ?? null,
+    });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Error al obtener el perfil' });

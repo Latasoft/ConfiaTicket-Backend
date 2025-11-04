@@ -45,6 +45,7 @@ function mapEvent(ev: any) {
     venue: ev.location,
     capacity: ev.capacity,
     status: ev.approved ? ('approved' as AdminStatus) : ('pending' as AdminStatus),
+    eventType: ev.eventType,
     organizerId: ev.organizerId,
     organizer: ev.organizer
       ? {
@@ -114,9 +115,17 @@ export async function adminListEvents(req: Request, res: Response) {
 
 /**
  * GET /api/admin/events/:id
+ * Obtiene los detalles de un evento específico
  */
 export async function adminGetEvent(req: Request, res: Response) {
   const id = Number(req.params.id);
+  
+  // validar id
+  if (!id || id <= 0) {
+    return res.status(400).json({ error: 'ID de evento inválido' });
+  }
+
+  // objeto con la informacion del evento
   const ev = await prisma.event.findUnique({
     where: { id },
     include: {
@@ -125,14 +134,93 @@ export async function adminGetEvent(req: Request, res: Response) {
           id: true,
           name: true,
           email: true,
+          rut: true,
           isActive: true,
           deletedAt: true,
+          // información de contacto del organizador
+          application: {
+            select: {
+              phone: true,
+              legalName: true,
+            },
+          },
         },
       },
     },
   });
-  if (!ev) return res.status(404).json({ error: 'Evento no encontrado' });
-  res.json(mapEvent(ev));
+
+  if (!ev) {
+    return res.status(404).json({ error: 'Evento no encontrado' });
+  }
+
+  // estadisticas de ventas
+  const [totalTicketsSold, totalRevenue] = await Promise.all([
+    // total de entradas vendidas
+    prisma.reservation.aggregate({
+      where: {
+        eventId: id,
+        status: 'PAID',
+      },
+      _sum: {
+        quantity: true,
+      },
+    }),
+    // ingresos totales
+    prisma.reservation.aggregate({
+      where: {
+        eventId: id,
+        status: 'PAID',
+      },
+      _sum: {
+        amount: true,
+      },
+    }),
+  ]);
+
+  const ticketsSold = totalTicketsSold._sum.quantity || 0;
+  const availableTickets = Math.max(0, ev.capacity - ticketsSold);
+
+  // Formatear información bancaria legacy del evento (si existe)
+  const eventBankingInfo = ev.payoutBankName && ev.payoutAccountNumber ? {
+    bankName: ev.payoutBankName,
+    accountType: ev.payoutAccountType,
+    accountNumber: ev.payoutAccountNumber,
+    holderName: ev.payoutHolderName,
+    holderRut: ev.payoutHolderRut,
+  } : null;
+
+  // Construir respuesta usando mapEvent + datos adicionales
+  const mappedEvent = mapEvent(ev);
+
+  res.json({
+    ...mappedEvent,
+    // Agregar campos adicionales del evento
+    city: ev.city,
+    commune: ev.commune,
+    price: ev.price,
+    
+    // Estadísticas de ventas
+    stats: {
+      ticketsSold,
+      availableTickets,
+      totalRevenue: totalRevenue._sum.amount || 0,
+    },
+    
+    // Información bancaria legacy del evento
+    eventBankingInfo,
+    
+    // Información adicional del organizador
+    organizer: ev.organizer ? {
+      id: ev.organizer.id,
+      name: ev.organizer.name,
+      email: ev.organizer.email,
+      rut: ev.organizer.rut,
+      phone: ev.organizer.application?.phone || null,
+      legalName: ev.organizer.application?.legalName || null,
+      isActive: ev.organizer.isActive,
+      deletedAt: ev.organizer.deletedAt,
+    } : undefined,
+  });
 }
 
 /**

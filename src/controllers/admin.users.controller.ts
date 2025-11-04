@@ -78,6 +78,13 @@ export async function adminListUsers(req: Request, res: Response) {
 
   const ids = itemsRaw.map((u) => u.id);
   const lastStatusMap = await getLatestOrganizerAppStatuses(ids);
+  
+  // Obtener también el applicationId para usuarios con solicitudes
+  const applications = await prisma.organizerApplication.findMany({
+    where: { userId: { in: ids } },
+    select: { userId: true, id: true },
+  });
+  const applicationIdMap = new Map(applications.map((a) => [a.userId, a.id]));
 
   const withComputed = itemsRaw.map((u) => {
     const status = lastStatusMap.get(u.id) ?? null;
@@ -87,6 +94,7 @@ export async function adminListUsers(req: Request, res: Response) {
     return {
       ...u,
       latestOrganizerAppStatus: status as "PENDING" | "APPROVED" | "REJECTED" | null,
+      applicationId: applicationIdMap.get(u.id) ?? null,
       effectiveCanSell,
     };
   });
@@ -105,6 +113,171 @@ export async function adminListUsers(req: Request, res: Response) {
     total: totalRaw,
     page,
     pageSize,
+  });
+}
+
+/**
+ * GET /api/admin/users/:id
+ * Obtiene los detalles completos de un usuario específico
+ */
+export async function adminGetUser(req: Request, res: Response) {
+  const id = Number(req.params.id);
+
+  // validar id
+  if (!id || id <= 0) {
+    return res.status(400).json({ error: "ID de usuario inválido" });
+  }
+
+  // objeto con la informacion del usuario
+  const user = await prisma.user.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      role: true,
+      rut: true,
+      birthDate: true,
+      canSell: true,
+      isVerified: true,
+      isActive: true,
+      deletedAt: true,
+      anonymizedAt: true,
+      documentUrl: true,
+      failedLoginCount: true,
+      lockUntil: true,
+      createdAt: true,
+      updatedAt: true,
+      // informacion de la solicitud para ser organizador
+      application: {
+        select: {
+          id: true,
+          legalName: true,
+          taxId: true,
+          phone: true,
+          idCardImage: true,
+          idCardImageBack: true,
+          notes: true,
+          status: true,
+          createdAt: true,
+          updatedAt: true,
+          // Datos bancarios de la solicitud
+          payoutBankName: true,
+          payoutAccountType: true,
+          payoutAccountNumber: true,
+          payoutHolderName: true,
+          payoutHolderRut: true,
+        },
+      },
+      // Información bancaria
+      connectedAccount: {
+        select: {
+          id: true,
+          psp: true,
+          pspAccountId: true,
+          onboardingStatus: true,
+          payoutsEnabled: true,
+          payoutBankName: true,
+          payoutAccountType: true,
+          payoutAccountNumber: true,
+          payoutHolderName: true,
+          payoutHolderRut: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      },
+    },
+  });
+
+  if (!user) {
+    return res.status(404).json({ error: "Usuario no encontrado" });
+  }
+
+  // Obtener estadisticas del usuario
+  const [eventsCount, reservationsCount, activeEventsCount] = await Promise.all([
+    // Total de eventos creados
+    prisma.event.count({ where: { organizerId: id } }),
+    // Total de reservas/compras realizadas
+    prisma.reservation.count({ where: { buyerId: id } }),
+    // Eventos activos (aprobados y no vencidos)
+    prisma.event.count({
+      where: {
+        organizerId: id,
+        approved: true,
+        date: { gte: new Date() }, // eventos futuros
+      },
+    }),
+  ]);
+
+  // verificar si esta habilitado para venta
+  const effectiveCanSell =
+    user.role === "organizer" && !!user.canSell && !!user.isActive && !user.deletedAt;
+
+  // formatear información bancaria
+  // Primero intenta usar ConnectedAccount, luego los datos de la Application
+  let bankingInfo = null;
+  
+  if (user.connectedAccount) {
+    // Usuario tiene cuenta conectada (organizador aprobado)
+    bankingInfo = {
+      hasBankAccount: !!(
+        user.connectedAccount.payoutBankName &&
+        user.connectedAccount.payoutAccountNumber
+      ),
+      payoutsEnabled: user.connectedAccount.payoutsEnabled,
+      bankDetails: {
+        bankName: user.connectedAccount.payoutBankName,
+        accountType: user.connectedAccount.payoutAccountType,
+        accountNumber: user.connectedAccount.payoutAccountNumber,
+        holderName: user.connectedAccount.payoutHolderName,
+        holderRut: user.connectedAccount.payoutHolderRut,
+      },
+      createdAt: user.connectedAccount.createdAt,
+      updatedAt: user.connectedAccount.updatedAt,
+    };
+  } else if (user.application?.payoutBankName) {
+    // Usuario tiene solicitud pendiente con datos bancarios
+    bankingInfo = {
+      hasBankAccount: !!(
+        user.application.payoutBankName &&
+        user.application.payoutAccountNumber
+      ),
+      payoutsEnabled: false, // No habilitado hasta ser aprobado
+      bankDetails: {
+        bankName: user.application.payoutBankName,
+        accountType: user.application.payoutAccountType,
+        accountNumber: user.application.payoutAccountNumber,
+        holderName: user.application.payoutHolderName,
+        holderRut: user.application.payoutHolderRut,
+      },
+      createdAt: user.application.createdAt,
+      updatedAt: user.application.updatedAt,
+    };
+  }
+
+  res.json({
+    ...user,
+    // incluir las URLs completas de las imágenes de cédula si existen
+    application: user.application ? {
+      ...user.application,
+      idCardImageUrl: user.application.idCardImage 
+        ? `/api/admin/documents/${user.application.idCardImage}`
+        : null,
+      idCardImageBackUrl: user.application.idCardImageBack 
+        ? `/api/admin/documents/${user.application.idCardImageBack}`
+        : null,
+    } : null,
+    stats: {
+      eventsCreated: eventsCount,
+      purchasesMade: reservationsCount,
+      activeEvents: activeEventsCount,
+    },
+    // estado de permisos
+    effectiveCanSell,
+    // estado de la solicitud de organizador
+    latestOrganizerAppStatus: user.application?.status ?? null,
+    // informacion bancaria
+    bankingInfo,
   });
 }
 

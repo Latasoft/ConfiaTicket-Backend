@@ -22,27 +22,31 @@ import organizerEventsRouter from './routes/organizer.events.routes';
 import adminEventsRouter from './routes/admin.events.routes';
 import adminUsersRouter from './routes/admin.users.routes';
 import adminOrganizerAppsRouter from './routes/admin.organizerApplications.routes';
+import adminDocumentsRouter from './routes/admin.documents.routes';
 
-// ⭐ Nuevos: pagos
 import paymentsRoutes from './routes/payments.routes';
 
-// ⭐ Nuevos: flujo de tickets (subida/aprobación/descarga)
-import organizerTicketsRoutes from './routes/organizer.tickets.routes';
+import organizerResaleTicketsRoutes from './routes/organizer.resaleTickets.routes';
+import organizerOwnEventSectionsRoutes from './routes/organizer.ownEventSections.routes';
 import adminTicketsRoutes from './routes/admin.tickets.routes';
 import ticketsRoutes from './routes/tickets.routes';
 
-// ⭐ NUEVO: PSP (split/escrow) – onboarding + webhook + utilidades
 import pspRoutes from './routes/psp.routes';
 
-// ⭐ NUEVO: Adapter HTTP de payouts (Kushki)
 import kushkiAdapter from './routes/payouts.adapter.kushki.routes';
 
-// ⭐ NUEVO: Admin payouts (retry/reconcile manual)
 import adminPayoutsRoutes from './routes/admin.payouts.routes';
 
-// ⭐ Jobs: reconciliación + reintentos
+import configRoutes from './routes/config.routes';
+import adminConfigRoutes from './routes/admin.config.routes';
+import organizerTicketValidationRoutes from './routes/organizer.ticketValidation.routes';
+import resaleTicketValidationRoutes from './routes/resaleTicketValidation.routes';
+import claimsRoutes from './routes/claims.routes';
+import documentsRoutes from './routes/documents.routes';
+
 import { startPayoutsReconcileJob } from './jobs/payouts.reconcile.job';
 import { startPayoutsRetryJob } from './jobs/payouts.retry.job';
+import { startCleanExpiredReservationsJob } from './jobs/cleanExpiredReservations.job';
 
 const app = express();
 
@@ -77,7 +81,7 @@ app.use(
 app.use(
   rateLimit({
     windowMs: 60 * 1000,
-    max: 200, // 200 req/min por IP
+    max: 500, // 500 req/min por IP (aumentado para desarrollo)
     standardHeaders: true,
     legacyHeaders: false,
   })
@@ -117,11 +121,15 @@ const UPLOADS_BASE = env.UPLOAD_DIR
 
 const PUBLIC_UPLOADS_DIR = path.join(UPLOADS_BASE, 'public');
 const PRIVATE_UPLOADS_DIR = path.join(UPLOADS_BASE, 'private');
+const DOCUMENTS_UPLOADS_DIR = path.join(UPLOADS_BASE, 'documents'); // Cédulas de identidad
+const CLAIMS_UPLOADS_DIR = path.join(UPLOADS_BASE, 'claims');       // Evidencia de reclamos
+const TICKETS_UPLOADS_DIR = path.join(UPLOADS_BASE, 'tickets');
 
-for (const p of [PUBLIC_UPLOADS_DIR, PRIVATE_UPLOADS_DIR]) {
+for (const p of [PUBLIC_UPLOADS_DIR, PRIVATE_UPLOADS_DIR, DOCUMENTS_UPLOADS_DIR, CLAIMS_UPLOADS_DIR, TICKETS_UPLOADS_DIR]) {
   if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
 }
 
+// Servir archivos públicos
 app.use(
   '/uploads',
   express.static(PUBLIC_UPLOADS_DIR, {
@@ -133,6 +141,22 @@ app.use(
     },
   })
 );
+
+// Servir archivos de tickets (públicos)
+app.use(
+  '/uploads/tickets',
+  express.static(TICKETS_UPLOADS_DIR, {
+    fallthrough: true,
+    maxAge: '7d',
+    setHeaders(res) {
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Cache-Control', 'public, max-age=604800');
+    },
+  })
+);
+
+// NOTA: Los documentos (cédulas de identidad) y claims (evidencia de reclamos) 
+// NO se sirven públicamente. Se acceden mediante endpoints protegidos:
 
 /* ======================== Rutas base ======================== */
 
@@ -149,14 +173,20 @@ app.use('/api/organizers', organizersRoutes);
 app.use('/api/bookings', bookingsRoutes);
 app.use('/api/organizer-applications', organizerApplicationRoutes);
 
-// Nuevas (admin/organizer)
+app.use('/api/config', configRoutes);
+
 app.use('/api/organizer/events', organizerEventsRouter);
+app.use('/api/organizer/ticket-validation', organizerTicketValidationRoutes);
+app.use('/api/resale-tickets', resaleTicketValidationRoutes);
 app.use('/api/admin/events', adminEventsRouter);
 app.use('/api/admin/users', adminUsersRouter);
 app.use('/api/admin/organizer-applications', adminOrganizerAppsRouter);
+app.use('/api/admin/documents', adminDocumentsRouter);
+app.use('/api/admin/config', adminConfigRoutes);
 
-// ⭐ Pagos Webpay/Transbank
 app.use('/api/payments', paymentsRoutes);
+app.use('/api/claims', claimsRoutes);
+app.use('/api/documents', documentsRoutes);
 
 // ⭐ PSP Marketplace (split/escrow)
 app.use('/api/psp', pspRoutes);
@@ -165,7 +195,11 @@ app.use('/api/psp', pspRoutes);
 app.use('/adapter/kushki', kushkiAdapter);
 
 // ⭐ Flujo de tickets
-app.use('/api/organizer', organizerTicketsRoutes);
+// reventa
+app.use('/api/organizer', organizerResaleTicketsRoutes);
+// evento propio
+app.use('/api/organizer', organizerOwnEventSectionsRoutes);
+// admin y comprador
 app.use('/api/admin', adminTicketsRoutes);
 app.use('/api/tickets', ticketsRoutes);
 
@@ -195,6 +229,7 @@ const host = '0.0.0.0';
 if ((process.env.NODE_ENV ?? 'development') !== 'test') {
   startPayoutsReconcileJob();
   startPayoutsRetryJob();
+  startCleanExpiredReservationsJob(5); // Ejecutar cada 5 minutos
 }
 
 let server: import('http').Server | undefined;

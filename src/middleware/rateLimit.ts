@@ -7,3 +7,11 @@ export const authLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Demasiados intentos. Intenta nuevamente más tarde.' },
 });
+
+export const readOnlyLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,    // 1 minuto
+  max: 100,                   // máx 100 peticiones por IP/ventana
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiadas peticiones. Intenta nuevamente en un momento.' },
+});

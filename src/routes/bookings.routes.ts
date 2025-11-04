@@ -9,9 +9,14 @@ import {
   holdReservation,
   payTestReservation,
   createBooking,            // opcional/backoffice
+  getBooking,
   listMyBookings,
   listOrganizerBookings,
   cancelBooking,
+  downloadTicket,
+  listReservationTickets,
+  downloadIndividualTicket,
+  getGroupReservationTickets,
 } from "../controllers/bookings.controller";
 
 const router = Router();
@@ -30,6 +35,12 @@ router.post("/", authenticateToken, createBooking);
 /** Mis reservas */
 router.get("/my", authenticateToken, listMyBookings);
 
+/** Obtener todas las reservaciones de un grupo de compra */
+router.get("/group/:purchaseGroupId/tickets", authenticateToken, getGroupReservationTickets);
+
+/** Obtener una reserva específica */
+router.get("/:id", authenticateToken, getBooking);
+
 /** Reservas del organizador (sus eventos) o superadmin */
 router.get(
   "/organizer",
@@ -46,6 +57,13 @@ router.get(
 
 /** Cancelar (dueño / organizer dueño / superadmin) */
 router.post("/:id/cancel", authenticateToken, cancelBooking);
+
+/** Tickets individuales (OWN events) */
+router.get("/:id/tickets", authenticateToken, listReservationTickets);
+router.get("/:id/tickets/:ticketId/download", authenticateToken, downloadIndividualTicket);
+
+/** Descargar ticket PDF (LEGACY - mantener compatibilidad) */
+router.get("/:id/ticket", authenticateToken, downloadTicket);
 
 export default router;
 

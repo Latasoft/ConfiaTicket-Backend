@@ -871,6 +871,8 @@ export async function buyerDownloadTicket(req: Request, res: Response) {
         fulfillmentStatus: true,
         ticketFilePath: true,
         ticketFileName: true,
+        generatedPdfPath: true,
+        event: { select: { eventType: true, title: true } },
       },
     });
     if (!reservation) return res.status(404).json({ error: "Reserva no encontrada" });
@@ -880,14 +882,32 @@ export async function buyerDownloadTicket(req: Request, res: Response) {
       return res.status(403).json({ error: "No puedes descargar esta entrada" });
     }
 
-    const allowed = ["TICKET_APPROVED", "DELIVERED"];
-    if (!allowed.includes(String(reservation.fulfillmentStatus))) {
-      return res.status(409).json({ error: "La entrada aún no está aprobada" });
+    // Determinar qué archivo descargar según el tipo de evento
+    let filePath: string | null = null;
+    let fileName: string | null = null;
+
+    // CASO 1: Evento OWN - Descargar PDF generado
+    if (reservation.event.eventType === 'OWN') {
+      if (!reservation.generatedPdfPath || !fs.existsSync(reservation.generatedPdfPath)) {
+        return res.status(409).json({ error: "PDF del ticket aún no está disponible" });
+      }
+      filePath = reservation.generatedPdfPath;
+      fileName = `ticket-${reservation.event.title.replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
     }
-    if (!reservation.ticketFilePath || !fs.existsSync(reservation.ticketFilePath)) {
-      return res.status(409).json({ error: "Archivo no disponible" });
+    // CASO 2: Evento RESALE - Descargar ticket físico escaneado (legacy)
+    else {
+      const allowed = ["TICKET_APPROVED", "DELIVERED"];
+      if (!allowed.includes(String(reservation.fulfillmentStatus))) {
+        return res.status(409).json({ error: "La entrada aún no está aprobada" });
+      }
+      if (!reservation.ticketFilePath || !fs.existsSync(reservation.ticketFilePath)) {
+        return res.status(409).json({ error: "Archivo no disponible" });
+      }
+      filePath = reservation.ticketFilePath;
+      fileName = reservation.ticketFileName?.trim() || path.basename(filePath);
     }
 
+    // Marcar como entregado si no lo está
     if (reservation.fulfillmentStatus !== "DELIVERED") {
       await prisma.reservation.update({
         where: { id: reservationId },
@@ -895,9 +915,9 @@ export async function buyerDownloadTicket(req: Request, res: Response) {
       });
     }
 
-    const filePath = path.resolve(reservation.ticketFilePath);
-    const fileName = (reservation.ticketFileName?.trim() || path.basename(filePath)).replace(/"/g, "");
-    return res.download(filePath, fileName);
+    const resolvedPath = path.resolve(filePath);
+    const sanitizedName = fileName.replace(/"/g, "");
+    return res.download(resolvedPath, sanitizedName);
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "Error descargando ticket" });
@@ -960,15 +980,48 @@ export async function listMyTickets(req: Request, res: Response) {
         take: pageSize,
         select: {
           id: true,
+          eventId: true,
           amount: true,
           quantity: true,
+          code: true,
+          status: true,
+          paidAt: true,
           createdAt: true,
+          expiresAt: true,
           fulfillmentStatus: true,
           ticketUploadedAt: true,
           deliveredAt: true,
           ticketFilePath: true,
           ticketMime: true,
-          event: { select: { title: true, date: true} },
+          // Campos para eventos OWN
+          generatedPdfPath: true,
+          qrCode: true,
+          seatAssignment: true,
+          scanned: true,
+          scannedAt: true,
+          // Relación con ticket RESALE
+          ticket: {
+            select: {
+              id: true,
+              ticketCode: true,
+              row: true,
+              seat: true,
+              zone: true,
+              level: true,
+              imageFileName: true,
+              imageMime: true,
+              sold: true,
+              soldAt: true,
+            },
+          },
+          event: {
+            select: {
+              id: true,
+              title: true,
+              date: true,
+              eventType: true,
+            },
+          },
           ticketUploadDeadlineAt: true,
           refundStatus: true,
         },
@@ -978,16 +1031,31 @@ export async function listMyTickets(req: Request, res: Response) {
     const items = rows.map((r) => {
       const flow =
         r.fulfillmentStatus || (r.ticketUploadedAt ? "UNDER_REVIEW" : "WAITING_TICKET");
-      const canDownload = flow === "TICKET_APPROVED" || flow === "DELIVERED";
+      const canDownload = flow === "TICKET_APPROVED" || flow === "DELIVERED" || r.generatedPdfPath;
       const mime = r.ticketMime || (r.ticketFilePath ? guessMimeByExt(r.ticketFilePath) : undefined);
       const size = safeStatSize(r.ticketFilePath);
 
       return {
         reservationId: r.id,
+        id: r.id,
+        eventId: r.eventId,
+        code: r.code,
+        status: r.status,
+        paidAt: r.paidAt,
+        expiresAt: r.expiresAt,
         createdAt: r.createdAt,
         event: r.event,
         quantity: r.quantity,
         amount: r.amount,
+        // Campos OWN
+        generatedPdfPath: r.generatedPdfPath,
+        qrCode: r.qrCode,
+        seatAssignment: r.seatAssignment,
+        scanned: r.scanned,
+        scannedAt: r.scannedAt,
+        // Ticket RESALE
+        ticket: r.ticket,
+        // Legacy
         flowStatus: flow,
         ticketUploadedAt: r.ticketUploadedAt,
         deliveredAt: r.deliveredAt,

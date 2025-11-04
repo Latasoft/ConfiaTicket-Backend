@@ -34,6 +34,7 @@ model User {
 
   events               Event[]       @relation("OrganizerEvents")
   reservations         Reservation[] @relation("ReservationBuyer")
+  claims               Claim[]       @relation("ClaimBuyer")
 
   application          OrganizerApplication?
 
@@ -55,6 +56,13 @@ model User {
   @@index([failedLoginCount])
 }
 
+/* ======================= TIPOS DE EVENTOS ======================= */
+
+enum EventType {
+  OWN      // evento propio
+  RESALE   // reventa
+}
+
 /* ======================= EVENTOS ======================= */
 
 model Event {
@@ -62,13 +70,15 @@ model Event {
   title         String    @db.VarChar(120)
   description   String    @db.VarChar(4000)
   date          DateTime
-  location      String    @db.VarChar(120)   // Lugar / recinto
-  city          String?   @db.VarChar(120)   // 👈 NUEVO
-  commune       String?   @db.VarChar(120)   // 👈 NUEVO
+  location      String    @db.VarChar(120)
+  city          String?   @db.VarChar(120)
+  commune       String?   @db.VarChar(120)
   capacity      Int
   price         Int       @default(0)
+  priceBase     Int?
   approved      Boolean   @default(false)
   coverImageUrl String?   @db.VarChar(1024)
+  eventType     EventType @default(OWN)
 
   organizer     User      @relation("OrganizerEvents", fields: [organizerId], references: [id])
   organizerId   Int
@@ -77,6 +87,9 @@ model Event {
   updatedAt     DateTime  @updatedAt @default(now())
 
   reservations  Reservation[]
+  tickets       Ticket[]
+  sections      EventSection[]  // Para eventos OWN
+  claims        Claim[]         @relation("ClaimEvent")
 
   // (LEGADO) Datos bancarios por evento — se recomienda moverlos al perfil/PSP del organizador
   payoutBankName      String? @db.VarChar(80)
@@ -91,8 +104,76 @@ model Event {
   @@index([organizerId])
   @@index([approved])
   @@index([date])
-  @@index([city])
-  @@index([commune])
+  @@index([eventType])
+}
+
+/* ===================== TICKETS (Solo RESALE) ===================== */
+
+model Ticket {
+  id            Int       @id @default(autoincrement())
+  event         Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId       Int
+
+  // Metadata del ticket fisico (solo RESALE)
+  ticketCode    String    @db.VarChar(100)
+  row           String    @db.VarChar(20)
+  seat          String    @db.VarChar(20)
+  zone          String?   @db.VarChar(50)
+  level         String?   @db.VarChar(50)
+  description   String?   @db.VarChar(200)
+
+  // Archivo del ticket original
+  imageFilePath String    @db.VarChar(1024)
+  imageFileName String    @db.VarChar(255)
+  imageMime     String    @db.VarChar(127)
+  imageChecksum String?   @db.VarChar(64)
+
+  // QR del ticket original y QR proxy para validacion
+  originalQrCode String?   @db.VarChar(500)   // QR extraido de la imagen original
+  proxyQrCode    String?   @unique @db.VarChar(100)  // UUID unico para proxy (link de validacion)
+  
+  // Tracking de escaneos del QR proxy
+  scannedCount   Int       @default(0)         // Contador de veces que se escaneo el QR proxy
+  lastScannedAt  DateTime?                     // Ultima vez que se escaneo
+  scannedLogs    Json?                         // Historial de escaneos [{timestamp, ip, userAgent, location}]
+
+  // Estado de venta
+  sold          Boolean   @default(false)
+  soldAt        DateTime?
+  
+  // Relacion 1-to-1 con Reservation
+  reservationId Int?      @unique
+  reservation   Reservation? @relation(fields: [reservationId], references: [id])
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt @default(now())
+
+  @@index([eventId, sold])
+  @@index([proxyQrCode])
+  @@unique([eventId, row, seat, zone])
+}
+
+/* ===================== SECCIONES (Solo OWN) ===================== */
+
+model EventSection {
+  id            Int      @id @default(autoincrement())
+  event         Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId       Int
+
+  // Metadata de la seccion
+  name          String   @db.VarChar(100)
+  rowStart      String?  @db.VarChar(20)
+  rowEnd        String?  @db.VarChar(20)
+  seatsPerRow   Int?
+  seatStart     Int?
+  seatEnd       Int?
+  totalCapacity Int      // Calculado
+  description   String?  @db.VarChar(200)
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt @default(now())
+
+  @@index([eventId])
 }
 
 /* ============ RESERVAS (COMPRA PRIMARIA) ============ */
@@ -129,6 +210,10 @@ model Reservation {
   buyerId   Int
   quantity  Int
 
+  // Agrupacion de multiples reservas en una compra
+  purchaseGroupId String?        @db.VarChar(36)
+  sectionId       Int?           // FK a EventSection para eventos OWN con secciones
+
   // Hold + pago
   status    ReservationStatus @default(PENDING_PAYMENT)
   code      String            @db.VarChar(36) @unique @default(uuid())
@@ -141,7 +226,20 @@ model Reservation {
   // 1–1 con Payment (Payment.reservationId es el FK)
   payment   Payment?
 
-  // Flujo de ticket
+  // Relacion con Ticket (solo RESALE) - vinculacion inversa
+  ticket    Ticket?
+
+  // Para eventos OWN: tickets generados (1 PDF por ticket comprado)
+  generatedTickets  GeneratedTicket[]
+  
+  // LEGACY: campos deprecados, mantener por compatibilidad
+  seatAssignment    String?  @db.VarChar(500)  // "A15, A16, A17"
+  generatedPdfPath  String?  @db.VarChar(1024)
+  qrCode            String?  @db.VarChar(100)
+  scanned           Boolean  @default(false)
+  scannedAt         DateTime?
+
+  // Flujo de ticket (LEGACY - mantener para compatibilidad)
   fulfillmentStatus  FulfillmentStatus @default(WAITING_TICKET)
   ticketFilePath     String?           @db.VarChar(1024)
   ticketFileName     String?           @db.VarChar(255)
@@ -167,6 +265,9 @@ model Reservation {
 
   // 🔽 Inversa libro mayor
   ledgerEntries LedgerEntry[] @relation("ReservationLedger")
+  
+  // Reclamos
+  claim Claim? @relation("ClaimReservation")
 
   @@index([eventId])
   @@index([buyerId])
@@ -175,6 +276,145 @@ model Reservation {
   @@index([approvedByAdminId])
   @@index([status, ticketUploadDeadlineAt])
   @@index([refundStatus])
+  @@index([qrCode])
+  @@index([scanned])
+  @@index([purchaseGroupId])
+  @@index([sectionId])
+}
+
+/* ============ TICKETS GENERADOS (OWN) ============ */
+
+model GeneratedTicket {
+  id            Int      @id @default(autoincrement())
+  reservation   Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  reservationId Int
+  
+  // Datos del ticket individual
+  ticketNumber  Int      // 1, 2, 3... (número dentro de la reserva)
+  seatNumber    String?  @db.VarChar(50)  // "A15", "VIP-23", etc.
+  qrCode        String   @db.VarChar(100) @unique
+  pdfPath       String   @db.VarChar(1024)
+  
+  // Estado del ticket
+  scanned       Boolean  @default(false)
+  scannedAt     DateTime?
+  scannedBy     String?  @db.VarChar(100)  // Identificador del escáner/usuario
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt @default(now())
+
+  @@index([reservationId])
+  @@index([qrCode])
+  @@index([scanned])
+}
+
+/* ============ RECLAMOS ============ */
+
+enum ClaimReason {
+  TICKET_NOT_RECEIVED      // No recibí el ticket
+  TICKET_INVALID           // El ticket es inválido o falso
+  TICKET_DUPLICATED        // El ticket ya fue usado/vendido a otra persona
+  EVENT_CANCELLED          // El evento fue cancelado
+  EVENT_CHANGED            // El evento cambió de fecha/lugar
+  WRONG_SEATS              // Los asientos no corresponden
+  POOR_QUALITY             // La calidad del ticket es mala
+  OVERCHARGED              // Me cobraron de más
+  OTHER                    // Otro motivo
+}
+
+enum ClaimStatus {
+  PENDING          // Pendiente de revisión
+  IN_REVIEW        // En revisión por el equipo
+  WAITING_INFO     // Esperando información adicional del comprador
+  RESOLVED         // Resuelto favorablemente
+  REJECTED         // Rechazado
+  CANCELLED        // Cancelado por el comprador
+}
+
+enum ClaimPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model Claim {
+  id              Int           @id @default(autoincrement())
+  
+  // Relaciones
+  buyer           User          @relation("ClaimBuyer", fields: [buyerId], references: [id])
+  buyerId         Int
+  reservation     Reservation   @relation("ClaimReservation", fields: [reservationId], references: [id])
+  reservationId   Int
+  event           Event         @relation("ClaimEvent", fields: [eventId], references: [id])
+  eventId         Int
+  
+  // Datos del reclamo
+  reason          ClaimReason
+  description     String        @db.VarChar(2000)
+  status          ClaimStatus   @default(PENDING)
+  priority        ClaimPriority @default(MEDIUM)
+  
+  // Evidencia (URL única inicial - DEPRECADO, usar ClaimMessage)
+  attachmentUrl   String?       @db.VarChar(1024)
+  
+  // Respuesta del admin (DEPRECADO, usar ClaimMessage)
+  adminResponse   String?       @db.VarChar(2000)
+  reviewedBy      Int?          // ID del admin que revisó
+  reviewedAt      DateTime?
+  
+  // Resolución
+  resolution      String?       @db.VarChar(2000)  // Explicación de la resolución
+  resolvedAt      DateTime?
+  
+  // Reaperturas
+  reopenCount     Int           @default(0)
+  reopenedAt      DateTime?
+  canReopen       Boolean       @default(true)
+  
+  // Timestamps
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt @default(now())
+  
+  // Relación con mensajes/comentarios
+  messages        ClaimMessage[]
+  
+  @@index([buyerId])
+  @@index([reservationId])
+  @@index([eventId])
+  @@index([status])
+  @@index([priority])
+  @@index([createdAt])
+  @@unique([reservationId])  // Un solo reclamo por reserva
+}
+
+enum ClaimMessageType {
+  BUYER_MESSAGE    // Mensaje del comprador
+  BUYER_EVIDENCE   // Evidencia subida por el comprador
+  ADMIN_RESPONSE   // Respuesta del administrador
+  SYSTEM_NOTE      // Nota del sistema (cambio de estado, etc.)
+}
+
+model ClaimMessage {
+  id          Int               @id @default(autoincrement())
+  
+  claim       Claim             @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  claimId     Int
+  
+  type        ClaimMessageType
+  message     String?           @db.VarChar(2000)
+  
+  // Archivos adjuntos (múltiples URLs separadas por comas o JSON array)
+  attachments Json?             // Array de URLs: ["url1", "url2", ...]
+  
+  // Autor (puede ser comprador o admin)
+  authorId    Int?              // ID del usuario que escribió
+  authorRole  String?           @db.VarChar(20)  // 'buyer' o 'superadmin'
+  
+  createdAt   DateTime          @default(now())
+  
+  @@index([claimId])
+  @@index([createdAt])
 }
 
 /* ============ SOLICITUD ORGANIZADOR ============ */
@@ -193,9 +433,15 @@ model OrganizerApplication {
   phone        String?           @db.VarChar(30)
   notes        String?           @db.Text
   idCardImage  String            @db.VarChar(1024)
+  idCardImageBack String         @db.VarChar(1024)
   status       ApplicationStatus @default(PENDING)
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
+  payoutBankName      String     @db.VarChar(80)
+  payoutAccountType   AccountType
+  payoutAccountNumber String     @db.VarChar(30)
+  payoutHolderName    String     @db.VarChar(100)
+  payoutHolderRut     String     @db.VarChar(16)
 
   user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -551,6 +797,76 @@ model EscrowTimeline {
 
   @@index([orderId])
 }
+
+enum ConfigCategory {
+  TICKET_LIMIT
+  PRICE_LIMIT
+  FIELD_LIMIT
+  BUSINESS_RULE
+}
+
+enum ConfigDataType {
+  INTEGER
+  DECIMAL
+  STRING
+  BOOLEAN
+}
+
+model SystemConfig {
+  id          Int            @id @default(autoincrement())
+  category    ConfigCategory
+  key         String         @unique @db.VarChar(100)
+  value       String         @db.VarChar(500)
+  dataType    ConfigDataType
+  description String?        @db.VarChar(500)
+  isEditable  Boolean        @default(true)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt @default(now())
+
+  @@index([category])
+  @@index([key])
+}
+
+model TicketLimitConfig {
+  id          Int      @id @default(autoincrement())
+  eventType   String   @unique @db.VarChar(20)
+  minCapacity Int
+  maxCapacity Int?     // Nullable para permitir sin límite (solo para OWN)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt @default(now())
+
+  @@index([eventType])
+}
+
+model PriceLimitConfig {
+  id                  Int      @id @default(autoincrement())
+  minPrice            Int
+  maxPrice            Int
+  resaleMarkupPercent Int
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt @default(now())
+}
+
+model PlatformFeeConfig {
+  id              Int      @id @default(autoincrement())
+  feeBps          Int      @default(0)    // Basis points: 100 bps = 1%
+  description     String?  @db.VarChar(500)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt @default(now())
+}
+
+model FieldLimitConfig {
+  id          Int      @id @default(autoincrement())
+  fieldName   String   @unique @db.VarChar(100)
+  maxLength   Int
+  context     String?  @db.VarChar(100)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt @default(now())
+
+  @@index([fieldName])
+  @@index([context])
+}
+
 
 
 

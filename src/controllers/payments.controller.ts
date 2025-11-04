@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 // ⬇️ Provider de payouts (http/sim)
 import { getPayoutProvider } from '../services/payouts/provider';
+import { processReservationAfterPayment } from '../services/reservation.service';
 import crypto from 'crypto';
 
 // Transbank SDK (Node)
@@ -119,10 +120,12 @@ export async function createPayment(req: Request, res: Response) {
     const userId = (req as any)?.user?.id as number | undefined;
     if (!userId) return res.status(401).json({ error: 'No autenticado' });
 
-    const eventId = toInt(req.body?.eventId);
-    const requestedQty = Math.max(1, Math.min(MAX_PER_PURCHASE, toInt(req.body?.quantity, 1)));
-
-    if (!eventId) return res.status(400).json({ error: 'eventId inválido' });
+    const reservationId = toInt(req.body?.reservationId);
+    
+    if (!reservationId) {
+      return res.status(400).json({ error: 'reservationId requerido' });
+    }
+    
     if (!env.WEBPAY_RETURN_URL) {
       return res.status(500).json({ error: 'Falta configurar WEBPAY_RETURN_URL en .env' });
     }
@@ -133,74 +136,38 @@ export async function createPayment(req: Request, res: Response) {
       : IntegrationCommerceCodes.WEBPAY_PLUS_DEFERRED;
 
     const { reservation, payment, event } = await prisma.$transaction(async (tx) => {
-      const event = await tx.event.findUnique({ where: { id: eventId } });
-      if (!event) throw new Error('Evento no encontrado');
-      if (!event.approved) throw new Error('Evento no aprobado');
-      if (new Date(event.date).getTime() <= Date.now()) throw new Error('El evento ya inició o finalizó');
+      // Obtener reserva existente de holdReservation
+      const reservationData = await tx.reservation.findUnique({
+        where: { id: reservationId },
+        include: { event: true },
+      });
 
-      // precio válido
-      if (!Number.isFinite(event.price) || (event.price as any) <= 0) {
-        throw new Error('Precio del evento inválido');
-      }
-
-      // 🚫 organizador no puede comprar su propio evento
-      if (event.organizerId === userId) {
-        const e: any = new Error('CANNOT_BUY_OWN_EVENT');
+      if (!reservationData) throw new Error('Reserva no encontrada');
+      if (reservationData.buyerId !== userId) {
+        const e: any = new Error('No autorizado');
         e.status = 403;
         throw e;
       }
-
-      // ¿Reserva pendiente vigente del usuario para este evento?
-      let reservation =
-        await tx.reservation.findFirst({
-          where: {
-            eventId,
-            buyerId: userId,
-            status: 'PENDING_PAYMENT',
-            expiresAt: { gt: now() },
-          },
-          orderBy: { createdAt: 'desc' },
-        });
-
-      if (!reservation) {
-        // Calcular disponibilidad actual
-        const paidAgg = await tx.reservation.aggregate({
-          _sum: { quantity: true },
-          where: { eventId, status: 'PAID' },
-        });
-        const pendingAgg = await tx.reservation.aggregate({
-          _sum: { quantity: true },
-          where: { eventId, status: 'PENDING_PAYMENT', expiresAt: { gt: now() } },
-        });
-
-        const committed =
-          (paidAgg._sum.quantity ?? 0) + (pendingAgg._sum.quantity ?? 0);
-        const remaining = event.capacity - committed;
-        if (remaining <= 0) throw new Error('Sin cupos disponibles');
-
-        const qty = Math.min(requestedQty, remaining);
-        if (qty < 1) throw new Error(`Solo quedan ${remaining} cupos disponibles`);
-
-        const amount = Math.round(event.price) * qty; // CLP entero
-
-        reservation = await tx.reservation.create({
-          data: {
-            eventId,
-            buyerId: userId,
-            quantity: qty,
-            status: 'PENDING_PAYMENT',
-            amount,
-            expiresAt: minutesFromNow(HOLD_MINUTES), // hold corto mientras vuelve de Webpay
-            fulfillmentStatus: 'WAITING_TICKET',
-          },
-        });
-      } else {
-        // Refrescar hold (no tocamos cantidad ni monto)
-        reservation = await tx.reservation.update({
-          where: { id: reservation.id },
-          data: { expiresAt: minutesFromNow(HOLD_MINUTES) },
-        });
+      if (reservationData.status === 'PAID') {
+        throw new Error('La reserva ya fue pagada');
       }
+      if (reservationData.status === 'CANCELED' || reservationData.status === 'EXPIRED') {
+        throw new Error('La reserva ya expiró o fue cancelada');
+      }
+      if (reservationData.expiresAt && new Date(reservationData.expiresAt) <= now()) {
+        throw new Error('La reserva expiró');
+      }
+
+      const event = reservationData.event;
+
+      // Renovar expiración para dar tiempo al pago
+      await tx.reservation.update({
+        where: { id: reservationData.id },
+        data: { expiresAt: minutesFromNow(HOLD_MINUTES) },
+      });
+
+      // Usar la reserva original con event incluido
+      const reservation = { ...reservationData, expiresAt: minutesFromNow(HOLD_MINUTES) };
 
       // Reusar/actualizar el Payment por reservationId (único)
       let payment = await tx.payment.findUnique({
@@ -555,6 +522,15 @@ export async function capturePayment(req: Request, res: Response) {
 
       return { pay, resv, payout };
     });
+
+    // Procesar reserva FUERA de la transacción para evitar timeout
+    // (generar PDF para OWN, marcar vendido para RESALE)
+    try {
+      await processReservationAfterPayment(updated.resv.id);
+    } catch (pdfError) {
+      console.error('Error procesando reserva después del pago:', pdfError);
+      // No fallar la respuesta, el pago ya se confirmó
+    }
 
     return res.status(200).json({
       ok: true,

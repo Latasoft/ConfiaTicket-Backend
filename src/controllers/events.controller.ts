@@ -205,7 +205,7 @@ export async function listPublicEvents(req: Request, res: Response) {
           select: {
             id: true, title: true, description: true, date: true, location: true,
             capacity: true, price: true, organizerId: true, approved: true,
-            createdAt: true, coverImageUrl: true,
+            createdAt: true, coverImageUrl: true, eventType: true,
           },
         }),
         prisma.event.findMany({
@@ -215,7 +215,7 @@ export async function listPublicEvents(req: Request, res: Response) {
           select: {
             id: true, title: true, description: true, date: true, location: true,
             capacity: true, price: true, organizerId: true, approved: true,
-            createdAt: true, coverImageUrl: true,
+            createdAt: true, coverImageUrl: true, eventType: true,
           },
         }),
       ]);
@@ -296,7 +296,7 @@ export async function listPublicEvents(req: Request, res: Response) {
       select: {
         id: true, title: true, description: true, date: true, location: true,
         capacity: true, price: true, organizerId: true, approved: true,
-        createdAt: true, coverImageUrl: true,
+        createdAt: true, coverImageUrl: true, eventType: true,
       },
     });
 
@@ -395,6 +395,7 @@ export async function listOrganizerEvents(req: Request, res: Response) {
           approved: true,
           createdAt: true,
           coverImageUrl: true,
+          eventType: true,
         },
       }),
       prisma.event.count({ where }),
@@ -430,6 +431,7 @@ export async function listPendingEvents(_req: Request, res: Response) {
         organizerId: true,
         approved: true,
         coverImageUrl: true,
+        eventType: true,
       },
     });
 
@@ -461,6 +463,7 @@ export async function getEventDetails(req: Request, res: Response) {
         approved: true,
         coverImageUrl: true,
         organizerId: true,
+        eventType: true,
         organizer: { select: { id: true, name: true, email: true } },
       },
     });
@@ -473,6 +476,21 @@ export async function getEventDetails(req: Request, res: Response) {
     const startsAt = event.date instanceof Date ? event.date : new Date(event.date);
     const salesCloseAt = getSalesCloseAt(startsAt);
     const salesClosed = now >= salesCloseAt;
+
+    // Determinar la capacidad real del evento
+    let totalCapacity = event.capacity;
+    
+    // Si el evento tiene secciones, usar la suma de capacidades de las secciones
+    if (event.eventType === 'OWN') {
+      const sections = await prisma.eventSection.findMany({
+        where: { eventId },
+        select: { totalCapacity: true },
+      });
+      
+      if (sections.length > 0) {
+        totalCapacity = sections.reduce((sum, section) => sum + section.totalCapacity, 0);
+      }
+    }
 
     // Ventas pagadas vs reservas activas (pendientes dentro del HOLD)
     const [paidAgg, pendingAgg] = await Promise.all([
@@ -494,14 +512,15 @@ export async function getEventDetails(req: Request, res: Response) {
     const paid = paidAgg._sum.quantity ?? 0;
     const pendingActive = pendingAgg._sum.quantity ?? 0;
 
-    const remainingPaidOnly = Math.max(0, event.capacity - paid);
-    const remaining = Math.max(0, event.capacity - (paid + pendingActive));
+    const remainingPaidOnly = Math.max(0, totalCapacity - paid);
+    const remaining = Math.max(0, totalCapacity - (paid + pendingActive));
 
     const hasStarted = now >= startsAt;
     const canBuy = event.approved && !hasStarted && !salesClosed && remaining > 0;
 
     return res.json({
       ...event,
+      capacity: totalCapacity, // Capacidad real (suma de secciones si existen)
       remaining,
       remainingPaidOnly,
       pendingActive,
