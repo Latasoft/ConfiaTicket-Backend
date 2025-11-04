@@ -296,7 +296,48 @@ export async function getMyEvent(req: Request, res: Response) {
   });
 
   if (!ev) return res.status(404).json({ error: 'No encontrado' });
-  res.json(mapEvent(ev));
+  
+  // Verificar si hay reservas pagadas (tickets vendidos)
+  const paidReservationsCount = await prisma.reservation.count({
+    where: {
+      eventId: id,
+      status: 'PAID',
+    },
+  });
+
+  // Verificar si el evento tiene todas sus secciones/tickets definidos
+  let sectionsComplete = false;
+  let sectionsCapacity = 0;
+  let missingCapacity = 0;
+
+  if (ev.eventType === 'OWN') {
+    // Para eventos OWN, verificar secciones
+    const sections = await prisma.eventSection.findMany({
+      where: { eventId: id },
+      select: { totalCapacity: true },
+    });
+    sectionsCapacity = sections.reduce((sum, s) => sum + s.totalCapacity, 0);
+    missingCapacity = Math.max(0, ev.capacity - sectionsCapacity);
+    sectionsComplete = sectionsCapacity === ev.capacity;
+  } else if (ev.eventType === 'RESALE') {
+    // Para eventos RESALE, verificar tickets
+    const ticketsCount = await prisma.ticket.count({
+      where: { eventId: id },
+    });
+    sectionsCapacity = ticketsCount;
+    missingCapacity = Math.max(0, ev.capacity - ticketsCount);
+    sectionsComplete = ticketsCount === ev.capacity;
+  }
+
+  const mappedEvent = mapEvent(ev);
+  res.json({
+    ...mappedEvent,
+    hasSoldTickets: paidReservationsCount > 0,
+    soldTicketsCount: paidReservationsCount,
+    sectionsComplete,
+    sectionsCapacity,
+    missingCapacity,
+  });
 }
 
 export async function updateMyEvent(req: Request, res: Response) {
@@ -308,6 +349,17 @@ export async function updateMyEvent(req: Request, res: Response) {
     select: { id: true, approved: true, eventType: true },
   });
   if (!exists) return res.status(404).json({ error: 'No encontrado' });
+
+  // Verificar si hay reservas pagadas (tickets vendidos)
+  const paidReservationsCount = await prisma.reservation.count({
+    where: {
+      eventId: id,
+      status: 'PAID',
+    },
+  });
+
+  // Si hay tickets vendidos, bloquear la edición de campos críticos
+  const hasSoldTickets = paidReservationsCount > 0;
 
   const config = await loadAllLimits();
   const { TICKET_LIMITS, PRICE_LIMITS, FIELD_LIMITS, ALLOWED_ACCOUNT_TYPES } = config;
@@ -348,6 +400,20 @@ export async function updateMyEvent(req: Request, res: Response) {
 
   const errors: string[] = [];
   const data: any = { approved: false };
+
+  // Campos críticos que no se pueden editar si hay tickets vendidos
+  const criticalFields = ['startAt', 'venue', 'city', 'commune', 'capacity', 'price', 'priceBase'];
+  
+  if (hasSoldTickets) {
+    const attemptedCriticalFields = criticalFields.filter(field => req.body[field] !== undefined);
+    if (attemptedCriticalFields.length > 0) {
+      return res.status(400).json({ 
+        error: 'No se puede editar este evento porque ya tiene entradas vendidas',
+        details: [`No puedes modificar: ${attemptedCriticalFields.join(', ')}`],
+        soldTicketsCount: paidReservationsCount,
+      });
+    }
+  }
 
   if (title !== undefined) {
     const v = toStr(title);
