@@ -50,52 +50,58 @@ export async function processReservationAfterPayment(reservationId: number): Pro
       ? reservation.seatAssignment.split(',').map(s => s.trim())
       : [];
 
-    // Generar un ticket individual por cada entrada comprada
-    for (let i = 0; i < reservation.quantity; i++) {
-      const ticketNumber = i + 1;
-      const seatNumber = seats[i] || `#${ticketNumber}`;
-      
-      // Generar código QR único para este ticket
-      const qrCode = await generateQRCode();
+    // Generar todos los PDFs en paralelo (sin crear registros aún)
+    const ticketsData = await Promise.all(
+      Array.from({ length: reservation.quantity }, async (_, i) => {
+        const ticketNumber = i + 1;
+        const seatNumber = seats[i] || `#${ticketNumber}`;
+        
+        // Generar código QR único para este ticket
+        const qrCode = await generateQRCode();
 
-      // Generar el PDF individual
-      const pdfPath = await generateTicketPDF({
-        eventName: event.title,
-        eventDate: event.date,
-        eventLocation: event.location,
-        buyerName: buyer.name,
-        buyerEmail: buyer.email,
-        seatAssignment: seatNumber,
-        sectionName,
-        qrCode,
-        reservationCode: reservation.code,
-        ticketNumber,
-        totalTickets: reservation.quantity,
-        totalAmount: reservation.amount,
-      });
+        // Generar el PDF individual
+        const pdfPath = await generateTicketPDF({
+          eventName: event.title,
+          eventDate: event.date,
+          eventLocation: event.location,
+          buyerName: buyer.name,
+          buyerEmail: buyer.email,
+          seatAssignment: seatNumber,
+          sectionName,
+          qrCode,
+          reservationCode: reservation.code,
+          ticketNumber,
+          totalTickets: reservation.quantity,
+          totalAmount: reservation.amount,
+        });
 
-      // Crear registro del ticket generado
-      await prisma.generatedTicket.create({
-        data: {
-          reservationId: reservation.id,
+        return {
           ticketNumber,
           seatNumber,
           qrCode,
           pdfPath,
-        },
-      });
-    }
+        };
+      })
+    );
+
+    // Insertar TODOS los tickets en una sola operación (bulk insert)
+    await prisma.generatedTicket.createMany({
+      data: ticketsData.map(t => ({
+        reservationId: reservation.id,
+        ticketNumber: t.ticketNumber,
+        seatNumber: t.seatNumber,
+        qrCode: t.qrCode,
+        pdfPath: t.pdfPath,
+      })),
+    });
+
+    console.log(`${reservation.quantity} PDFs generados en paralelo + bulk insert para reserva ${reservationId}`);
 
     // Actualizar la reserva para mantener compatibilidad (opcional)
-    const allQrCodes = await prisma.generatedTicket.findMany({
-      where: { reservationId: reservation.id },
-      select: { qrCode: true },
-    });
-    
     await prisma.reservation.update({
       where: { id: reservationId },
       data: {
-        qrCode: allQrCodes[0]?.qrCode, // Primer QR para compatibilidad
+        qrCode: ticketsData[0]?.qrCode, // Primer QR para compatibilidad
       },
     });
   }
@@ -169,38 +175,37 @@ export async function processReservationAfterPayment(reservationId: number): Pro
   }
 
   // ============ ENVÍO DE EMAILS ============
-  // Enviar email de confirmación al comprador
-  try {
-    await sendPurchaseConfirmationEmail({
-      buyerEmail: buyer.email,
-      buyerName: buyer.name,
-      eventTitle: event.title,
-      eventDate: event.date,
-      eventLocation: event.location,
-      quantity: reservation.quantity,
-      totalAmount: reservation.amount,
-      reservationCode: reservation.code,
-      reservationId: reservation.id,
+  // Enviar emails de forma asíncrona 
+  // Email de confirmación al comprador (async)
+  sendPurchaseConfirmationEmail({
+    buyerEmail: buyer.email,
+    buyerName: buyer.name,
+    eventTitle: event.title,
+    eventDate: event.date,
+    eventLocation: event.location,
+    quantity: reservation.quantity,
+    totalAmount: reservation.amount,
+    reservationCode: reservation.code,
+    reservationId: reservation.id,
+  })
+    .then(() => console.log('Email de confirmación enviado a:', buyer.email))
+    .catch((emailError: any) => {
+      console.error('Error enviando email de confirmación:', emailError.message);
     });
-  } catch (emailError: any) {
-    console.error('❌ Error enviando email de confirmación:', emailError.message);
-    // No fallar el proceso si falla el email
-  }
 
-  // Enviar notificación al admin
-  try {
-    await sendPurchaseNotificationToAdmin({
-      buyerName: buyer.name,
-      buyerEmail: buyer.email,
-      eventTitle: event.title,
-      quantity: reservation.quantity,
-      totalAmount: reservation.amount,
-      reservationId: reservation.id,
+  // Notificación al admin (async)
+  sendPurchaseNotificationToAdmin({
+    buyerName: buyer.name,
+    buyerEmail: buyer.email,
+    eventTitle: event.title,
+    quantity: reservation.quantity,
+    totalAmount: reservation.amount,
+    reservationId: reservation.id,
+  })
+    .then(() => console.log('Email de notificación enviado al admin'))
+    .catch((emailError: any) => {
+      console.error('❌ Error enviando notificación a admin:', emailError.message);
     });
-  } catch (emailError: any) {
-    console.error('❌ Error enviando notificación a admin:', emailError.message);
-    // No fallar el proceso si falla el email
-  }
 }
 
 /**
