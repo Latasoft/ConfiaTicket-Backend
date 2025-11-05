@@ -76,13 +76,27 @@ if (ORIGINS.length === 0) {
 
 console.log('CORS configurado para origins:', ORIGINS);
 
-app.use(
+// Rutas que NO requieren CORS (webhooks, callbacks externos)
+const NO_CORS_PATHS = [
+  '/api/payments/commit',           // Transbank callback
+  '/api/payments/return',            // Transbank return (legacy)
+  '/api/payments/resale/return',    // Transbank return resale
+  '/api/payments/payouts/webhook',  // Webhook de payouts
+];
+
+app.use((req, res, next) => {
+  // Skip CORS para rutas de webhooks/callbacks
+  if (NO_CORS_PATHS.some(path => req.path === path)) {
+    console.log(`[CORS] Skipping CORS for webhook: ${req.method} ${req.path}`);
+    return next();
+  }
+
+  // Aplicar CORS normal
   cors({
     origin(origin, cb) {
-      // Rechazar requests sin Origin header (excepto health checks específicos)
+      // Permitir requests sin Origin header (health checks, server-to-server)
       if (!origin) {
-        // Permitir solo para rutas de health check
-        return cb(null, true); // Temporal: se puede restringir más
+        return cb(null, true);
       }
       if (ORIGINS.includes(origin)) return cb(null, true);
       console.warn(`CORS bloqueado: ${origin}`);
@@ -91,8 +105,8 @@ app.use(
     credentials: true,
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Idempotency-Key', 'X-Request-Id'],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  })
-);
+  })(req, res, next);
+});
 
 // Rate limiters diferenciados por tipo de endpoint
 const strictAuthLimiter = rateLimit({

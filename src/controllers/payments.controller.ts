@@ -267,6 +267,12 @@ export async function createPayment(req: Request, res: Response) {
  *  - NUEVO: si el organizador tiene ConnectedAccount, guardamos destinationAccountId en Payment.
  */
 export async function commitPayment(req: Request, res: Response) {
+  console.log('🔵 [COMMIT] Iniciando commitPayment');
+  console.log('🔵 [COMMIT] Method:', req.method);
+  console.log('🔵 [COMMIT] Headers:', JSON.stringify(req.headers, null, 2));
+  console.log('🔵 [COMMIT] Body:', JSON.stringify(req.body, null, 2));
+  console.log('🔵 [COMMIT] Query:', JSON.stringify(req.query, null, 2));
+  
   try {
     const token = String(
       (req.body?.token_ws ?? req.query?.token_ws ?? '')
