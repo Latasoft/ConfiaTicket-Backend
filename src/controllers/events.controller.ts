@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import prisma from '../prisma/client';
+import { getTicketLimits } from '../services/config.service';
 
 /* ============ Config de cierre de ventas (por defecto 24 h) ============ */
 const SALES_CUTOFF_MINUTES = Number(process.env.SALES_CUTOFF_MINUTES ?? 1440);
@@ -79,8 +80,21 @@ export async function createEvent(req: Request, res: Response) {
     }
 
     const capacityNumber = Number(capacity);
-    if (!Number.isInteger(capacityNumber) || capacityNumber < 1 || capacityNumber > 4) {
-      return res.status(400).json({ error: 'La capacidad debe ser un entero entre 1 y 4.' });
+    if (!Number.isInteger(capacityNumber) || capacityNumber < 1) {
+      return res.status(400).json({ error: 'La capacidad debe ser un número entero mayor a 0.' });
+    }
+
+    // Validar límites de capacidad según configuración (RESALE )
+    // Endpoint legacy para eventos RESALE
+    // Para eventos OWN, usar el endpoint de organizer.events.controller.ts
+    const ticketLimits = await getTicketLimits();
+    const maxCapacityResale = ticketLimits.RESALE?.MAX || 4;
+    
+    if (capacityNumber > maxCapacityResale) {
+      return res.status(400).json({ 
+        error: `La capacidad no puede exceder ${maxCapacityResale} tickets para eventos de reventa.`,
+        maxCapacity: maxCapacityResale
+      });
     }
 
     const priceNumber = Number(price);
