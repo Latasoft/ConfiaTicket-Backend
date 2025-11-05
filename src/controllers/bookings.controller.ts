@@ -467,27 +467,27 @@ export async function payTestReservation(req: Authed, res: Response) {
       };
     });
 
-    // Procesar cada reserva FUERA de la transacción para evitar timeout
-    // (generar PDFs individuales para OWN, marcar vendido para RESALE)
-    const processedReservations = [];
-    for (const reservation of result.reservations) {
-      try {
-        await processReservationAfterPayment(reservation.id);
-        processedReservations.push(reservation);
-      } catch (pdfError) {
-        console.error(`Error procesando reserva ${reservation.id} después del pago:`, pdfError);
-        // No fallar la respuesta, el pago ya se confirmó
-        processedReservations.push(reservation);
-      }
-    }
+    // Procesar TODAS las reservas en paralelo de forma asíncrona (fire-and-forget)
+    // Esto permite responder inmediatamente al cliente mientras los PDFs se generan en background
+    result.reservations.forEach(reservation => {
+      processReservationAfterPayment(reservation.id)
+        .then(() => {
+          console.log(`✅ [TEST_PAY] Reserva ${reservation.id} procesada exitosamente (async)`);
+        })
+        .catch((pdfError) => {
+          console.error(`❌ [TEST_PAY] Error procesando reserva ${reservation.id} (async):`, pdfError);
+          // No afecta la respuesta, el pago ya se confirmó
+        });
+    });
 
     return res.json({ 
       ok: true, 
-      reservations: processedReservations,
+      reservations: result.reservations,
       purchaseGroupId: result.purchaseGroupId,
-      totalAmount: processedReservations.reduce((sum, r) => sum + r.amount, 0),
+      totalAmount: result.reservations.reduce((sum, r) => sum + r.amount, 0),
       // Compatibilidad con frontend antiguo
-      booking: processedReservations[0],
+      booking: result.reservations[0],
+      note: 'Pago confirmado. Tickets generándose en background.',
     });
   } catch (err: any) {
     const status = err?.status ?? 500;

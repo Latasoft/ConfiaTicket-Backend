@@ -741,15 +741,20 @@ export async function adminApproveTicket(req: Request, res: Response) {
       return { resv, pay };
     });
 
-    const { payoutId, payoutOk, note } = await ensureAndTriggerPayout(updated.pay);
+    // Disparar payout de forma asíncrona (fire-and-forget) para no bloquear la respuesta
+    ensureAndTriggerPayout(updated.pay)
+      .then(({ payoutId, payoutOk }) => {
+        console.log(`✅ [APPROVE] Payout ${payoutId} disparado exitosamente (async): ${payoutOk}`);
+      })
+      .catch((payoutError) => {
+        console.error('❌ [APPROVE] Error disparando payout (async):', payoutError);
+      });
 
     return res.json({
       ok: true,
       reservation: updated.resv,
       captured: true,
-      payoutId: payoutId ?? null,
-      payoutDispatched: payoutOk ?? false,
-      note: note ?? undefined,
+      note: 'Ticket aprobado. Payout procesándose en background.',
     });
   } catch (err) {
     console.error(err);
