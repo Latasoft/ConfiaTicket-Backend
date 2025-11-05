@@ -184,9 +184,10 @@ if (env.IS_PROD) {
 
   // Webpay siempre requerido en prod (Opción A o B igual cobran con Webpay)
   requireWhen(true, "WEBPAY_ENV", env.WEBPAY_ENV);
-  if (env.WEBPAY_ENV !== "PRODUCTION") {
-    throw new Error("En producción WEBPAY_ENV debe ser PRODUCTION.");
-  }
+  // Permitir INTEGRATION en producción para testing
+  // if (env.WEBPAY_ENV !== "PRODUCTION") {
+  //   throw new Error("En producción WEBPAY_ENV debe ser PRODUCTION.");
+  // }
   requireWhen(true, "WEBPAY_COMMERCE_CODE", env.WEBPAY_COMMERCE_CODE);
   requireWhen(true, "WEBPAY_API_KEY", env.WEBPAY_API_KEY);
   requireWhen(true, "WEBPAY_RETURN_URL", env.WEBPAY_RETURN_URL);

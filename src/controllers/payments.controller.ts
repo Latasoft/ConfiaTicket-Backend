@@ -423,7 +423,8 @@ export async function commitPayment(req: Request, res: Response) {
       const eventId = payment.reservation?.eventId;
       if (eventId && payload.ok) {
         // Construir URL: /eventos/:id?showPurchaseSuccess=true&reservationId=X
-        const baseUrl = env.WEBPAY_FINAL_URL.replace('/payment-result', '');
+        // Normalizar base URL (remover /eventos o /payment-result si existen)
+        let baseUrl = env.WEBPAY_FINAL_URL.replace(/\/payment-result\/?$/, '').replace(/\/eventos\/?$/, '');
         const eventUrl = `${baseUrl}/eventos/${eventId}`;
         const u = new URL(eventUrl);
         u.searchParams.set('showPurchaseSuccess', 'true');
@@ -431,16 +432,19 @@ export async function commitPayment(req: Request, res: Response) {
         if (payment.reservation?.purchaseGroupId) {
           u.searchParams.set('purchaseGroupId', payment.reservation.purchaseGroupId);
         }
+        console.log('Redirigiendo a:', u.toString());
         return res.redirect(303, u.toString());
       }
       
       // Fallback: ruta legacy payment-result (solo para errores)
-      const u = new URL(env.WEBPAY_FINAL_URL);
+      let baseUrl = env.WEBPAY_FINAL_URL.replace(/\/payment-result\/?$/, '').replace(/\/eventos\/?$/, '');
+      const u = new URL(`${baseUrl}/payment-result`);
       u.searchParams.set('status', payload.ok ? 'success' : (isOwnEvent ? 'own-event-forbidden' : 'failed'));
       u.searchParams.set('token', token);
       u.searchParams.set('buyOrder', payment.buyOrder || '');
       u.searchParams.set('amount', String(payment.amount));
       if (payment.reservationId) u.searchParams.set('reservationId', String(payment.reservationId));
+      console.log('Redirigiendo a fallback:', u.toString());
       return res.redirect(303, u.toString());
     }
 
