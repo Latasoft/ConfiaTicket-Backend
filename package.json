@@ -5,7 +5,7 @@
   "scripts": {
     "prebuild": "rimraf dist || rmdir /s /q dist 2> NUL || exit 0",
     "build": "tsc -p tsconfig.json",
-    "start": "prisma db push --accept-data-loss && npm run seed && node dist/server.js",
+    "start": "node dist/server.js",
     "dev": "ts-node --transpile-only src/server.ts",
     "prisma:generate": "prisma generate",
     "migrate:deploy": "prisma migrate deploy",
@@ -13,12 +13,24 @@
     "seed": "node prisma/seed.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "prisma": {
+    "seed": "node prisma/seed.js"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
   "dependencies": {
     "@prisma/client": "^6.15.0",
+    "@types/bcrypt": "^6.0.0",
+    "@types/compression": "^1.8.1",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/morgan": "^1.9.10",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^24.3.1",
+    "@types/nodemailer": "^7.0.0",
     "@types/pdfkit": "^0.17.3",
     "@types/qrcode": "^1.5.6",
     "@types/sharp": "^0.31.1",
@@ -35,28 +47,19 @@
     "multer": "^2.0.2",
     "nodemailer": "^7.0.5",
     "pdfkit": "^0.17.2",
+    "prisma": "^6.15.0",
     "qrcode": "^1.5.4",
+    "rimraf": "^6.0.1",
     "sharp": "^0.34.4",
-    "transbank-sdk": "^6.1.0"
+    "transbank-sdk": "^6.1.0",
+    "typescript": "^5.9.2"
   },
   "devDependencies": {
-    "@types/bcrypt": "^6.0.0",
-    "@types/compression": "^1.8.1",
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.3",
-    "@types/jsonwebtoken": "^9.0.10",
-    "@types/morgan": "^1.9.10",
-    "@types/multer": "^2.0.0",
-    "@types/node": "^24.3.1",
-    "@types/nodemailer": "^7.0.0",
     "@typescript-eslint/eslint-plugin": "^8.46.2",
     "@typescript-eslint/parser": "^8.46.2",
     "eslint": "^9.39.0",
     "eslint-config-prettier": "^10.1.8",
     "prettier": "^3.6.2",
-    "prisma": "^6.15.0",
-    "rimraf": "^6.0.1",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.9.2"
+    "ts-node": "^10.9.2"
   }
 }

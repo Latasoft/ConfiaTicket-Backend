@@ -6,25 +6,32 @@ import bcrypt from 'bcrypt';
 const prisma = new PrismaClient();
 
 async function seedConfig() {
-  await prisma.ticketLimitConfig.upsert({
-    where: { eventType: 'RESALE' },
-    update: {},
-    create: {
-      eventType: 'RESALE',
-      minCapacity: 1,
-      maxCapacity: 4,
-    },
+  // TicketLimitConfig - solo crear si NO existe
+  const resaleLimit = await prisma.ticketLimitConfig.findUnique({
+    where: { eventType: 'RESALE' }
   });
+  if (!resaleLimit) {
+    await prisma.ticketLimitConfig.create({
+      data: {
+        eventType: 'RESALE',
+        minCapacity: 1,
+        maxCapacity: 4,
+      },
+    });
+  }
 
-  await prisma.ticketLimitConfig.upsert({
-    where: { eventType: 'OWN' },
-    update: {},
-    create: {
-      eventType: 'OWN',
-      minCapacity: 1,
-      maxCapacity: 999999,
-    },
+  const ownLimit = await prisma.ticketLimitConfig.findUnique({
+    where: { eventType: 'OWN' }
   });
+  if (!ownLimit) {
+    await prisma.ticketLimitConfig.create({
+      data: {
+        eventType: 'OWN',
+        minCapacity: 1,
+        maxCapacity: 999999,
+      },
+    });
+  }
 
   const priceLimitExists = await prisma.priceLimitConfig.findFirst();
   if (!priceLimitExists) {
@@ -58,12 +65,16 @@ async function seedConfig() {
     { fieldName: 'TICKET_DESCRIPTION', maxLength: 200, context: 'TICKET' },
   ];
 
+  // Solo crear FieldLimitConfig que NO existan
   for (const field of fieldLimits) {
-    await prisma.fieldLimitConfig.upsert({
-      where: { fieldName: field.fieldName },
-      update: {},
-      create: field,
+    const existing = await prisma.fieldLimitConfig.findUnique({
+      where: { fieldName: field.fieldName }
     });
+    if (!existing) {
+      await prisma.fieldLimitConfig.create({
+        data: field,
+      });
+    }
   }
 
   const systemConfigs = [
@@ -77,33 +88,32 @@ async function seedConfig() {
     },
   ];
 
+  // Solo crear SystemConfig que NO existan
   for (const config of systemConfigs) {
-    await prisma.systemConfig.upsert({
-      where: { key: config.key },
-      update: {},
-      create: config,
+    const existing = await prisma.systemConfig.findUnique({
+      where: { key: config.key }
     });
+    if (!existing) {
+      await prisma.systemConfig.create({
+        data: config,
+      });
+    }
   }
 
-  // Platform Fee Config - usar variable de entorno si está disponible
-  const feeBpsFromEnv = process.env.PSP_APP_FEE_BPS ? parseInt(process.env.PSP_APP_FEE_BPS) : null;
-  const defaultFeeBps = 250; // 2.5% por defecto
-  
+  // Platform Fee Config - SOLO crear si no existe, NO sobrescribir
   const platformFeeExists = await prisma.platformFeeConfig.findFirst();
   if (!platformFeeExists) {
+    const feeBpsFromEnv = process.env.PSP_APP_FEE_BPS ? parseInt(process.env.PSP_APP_FEE_BPS) : null;
+    const defaultFeeBps = 250; // 2.5% por defecto
+    
     await prisma.platformFeeConfig.create({
       data: {
         feeBps: feeBpsFromEnv ?? defaultFeeBps,
         // description: null, // Campo vacío por defecto para que se muestre el placeholder
       },
     });
-  } else if (feeBpsFromEnv !== null) {
-    // Si existe en .env, sobrescribir el valor en BD
-    await prisma.platformFeeConfig.update({
-      where: { id: platformFeeExists.id },
-      data: { feeBps: feeBpsFromEnv },
-    });
   }
+  // Si ya existe, NO tocar (permite edición desde admin panel)
 }
 
 async function main() {
@@ -113,32 +123,33 @@ async function main() {
 
   const passwordHash = await bcrypt.hash(plain, 12);
 
-  // upsert idempotente por email
-  const admin = await prisma.user.upsert({
-    where: { email },
-    update: {
-      role: 'superadmin',
-      isActive: true,
-      deletedAt: null,
-      password: passwordHash,
-      // tokenVersion opcional (mantener o resetear)
-      // tokenVersion: 0,
-    },
-    create: {
-      email,
-      name: 'Super Admin',
-      role: 'superadmin',
-      isActive: true,
-      password: passwordHash,
-      // completa otros campos requeridos por tu schema si los tienes
-    },
-    select: { id: true, email: true, role: true, isActive: true, createdAt: true },
+  // SOLO crear superadmin si NO existe (no sobrescribir)
+  const existingAdmin = await prisma.user.findUnique({
+    where: { email }
   });
 
-  console.log('✅ Superadmin creado/actualizado:');
-  console.log('   Email:', admin.email);
-  console.log('   Password:', plain);
-  console.log('   Rol:', admin.role);
+  if (!existingAdmin) {
+    const admin = await prisma.user.create({
+      data: {
+        email,
+        name: 'Super Admin',
+        role: 'superadmin',
+        isActive: true,
+        password: passwordHash,
+        // completa otros campos requeridos por tu schema si los tienes
+      },
+      select: { id: true, email: true, role: true, isActive: true, createdAt: true },
+    });
+
+    console.log('✅ Superadmin creado:');
+    console.log('   Email:', admin.email);
+    console.log('   Password:', plain);
+    console.log('   Rol:', admin.role);
+  } else {
+    console.log('ℹ️  Superadmin ya existe, no se modifica:');
+    console.log('   Email:', existingAdmin.email);
+    console.log('   Rol:', existingAdmin.role);
+  }
 
   // Seed de configuración
   await seedConfig();
