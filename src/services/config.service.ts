@@ -138,6 +138,38 @@ export async function getReservationHoldMinutes(): Promise<number> {
   return configCache.reservationHold?.holdMinutes ?? 15;
 }
 
+/**
+ * Obtiene el máximo de tickets por compra
+ * Prioridad: DB > ENV > Default (4)
+ */
+export async function getMaxTicketsPerPurchase(): Promise<number> {
+  await refreshConfigCache();
+  const fromDb = configCache.businessRules?.['MAX_TICKETS_PER_PURCHASE'];
+  if (typeof fromDb === 'number') return fromDb;
+  
+  // Fallback a ENV si existe
+  const fromEnv = env.MAX_TICKETS_PER_PURCHASE;
+  if (typeof fromEnv === 'number') return fromEnv;
+  
+  return 4; // Default
+}
+
+/**
+ * Obtiene el plazo en horas para crear un reclamo después del evento
+ * Prioridad: DB > ENV > Default (48)
+ */
+export async function getClaimDeadlineHours(): Promise<number> {
+  await refreshConfigCache();
+  const fromDb = configCache.businessRules?.['CLAIM_DEADLINE_HOURS'];
+  if (typeof fromDb === 'number') return fromDb;
+  
+  // Fallback a ENV si existe
+  const fromEnv = env.CLAIM_DEADLINE_HOURS;
+  if (typeof fromEnv === 'number') return fromEnv;
+  
+  return 48; // Default
+}
+
 export function clearConfigCache() {
   configCache = {};
 }

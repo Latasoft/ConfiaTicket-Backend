@@ -6,6 +6,7 @@ import {
   sendClaimCreatedEmail, 
   sendClaimStatusUpdateEmail 
 } from '../services/email.service';
+import { getClaimDeadlineHours } from '../services/config.service';
 
 type Authed = { id: number; role: string };
 
@@ -79,7 +80,8 @@ export async function createClaim(req: Request, res: Response) {
     });
   }
 
-  const hoursLimit = 48;
+  // ✅ Validar que el reclamo se haga dentro de las horas configuradas posteriores AL EVENTO
+  const hoursLimit = await getClaimDeadlineHours(); // Obtener desde DB > ENV > Default (48)
   const eventDate = reservation.event.date;
   const currentTime = new Date();
   

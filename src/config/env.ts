@@ -103,7 +103,12 @@ export const env = {
   /* ⏱️ Retención de la pre-autorización (horas) */
   AUTH_HOLD_HOURS: toInt(process.env.AUTH_HOLD_HOURS, 72),
 
+  /* ⏱️ Tiempo de hold de reservas (minutos) */
   RESERVATION_HOLD_MINUTES: toInt(process.env.RESERVATION_HOLD_MINUTES, 15),
+
+  /* ===== Límites de negocio ===== */
+  MAX_TICKETS_PER_PURCHASE: toInt(process.env.MAX_TICKETS_PER_PURCHASE, 4),
+  CLAIM_DEADLINE_HOURS: toInt(process.env.CLAIM_DEADLINE_HOURS, 48),
 
   /* ===== Reventa / Escrow ===== */
   RESALE_ESCROW_UPLOAD_HOURS: toInt(process.env.RESALE_ESCROW_UPLOAD_HOURS, 24),

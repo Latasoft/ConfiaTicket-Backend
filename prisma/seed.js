@@ -86,6 +86,22 @@ async function seedConfig() {
       description: 'Tipos de cuenta bancaria permitidos',
       isEditable: true,
     },
+    {
+      category: 'BUSINESS_RULE',
+      key: 'MAX_TICKETS_PER_PURCHASE',
+      value: '4',
+      dataType: 'INTEGER',
+      description: 'Máximo de tickets que se pueden comprar por transacción',
+      isEditable: true,
+    },
+    {
+      category: 'BUSINESS_RULE',
+      key: 'CLAIM_DEADLINE_HOURS',
+      value: '48',
+      dataType: 'INTEGER',
+      description: 'Horas después del evento para crear un reclamo',
+      isEditable: true,
+    },
   ];
 
   // Solo crear SystemConfig que NO existan

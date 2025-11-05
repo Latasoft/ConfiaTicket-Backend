@@ -7,7 +7,7 @@ import path from 'path';
 // ⬇️ Provider de payouts (http/sim)
 import { getPayoutProvider } from '../services/payouts/provider';
 import { processReservationAfterPayment } from '../services/reservation.service';
-import { getPlatformFeeBps, getReservationHoldMinutes } from '../services/config.service';
+import { getPlatformFeeBps, getReservationHoldMinutes, getMaxTicketsPerPurchase } from '../services/config.service';
 import crypto from 'crypto';
 
 // Transbank SDK (Node)
@@ -43,6 +43,7 @@ function newIdempotencyKey(prefix = 'payout') {
   }
 }
 
+// DEPRECADO: Usar getMaxTicketsPerPurchase() en su lugar
 const MAX_PER_PURCHASE = 4;
 const HOLD_MINUTES = 15;
 
