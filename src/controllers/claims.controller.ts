@@ -79,13 +79,27 @@ export async function createClaim(req: Request, res: Response) {
     });
   }
 
-  // Validar que el reclamo se haga dentro de las 48 horas posteriores a la compra
   const hoursLimit = 48;
-  const hoursSincePurchase = (Date.now() - reservation.paidAt!.getTime()) / (1000 * 60 * 60);
+  const eventDate = reservation.event.date;
+  const currentTime = new Date();
   
-  if (hoursSincePurchase > hoursLimit) {
+  // No permitir reclamos ANTES del evento
+  if (currentTime < eventDate) {
     return res.status(400).json({ 
-      error: `El plazo para crear un reclamo ha expirado. Solo puedes reclamar dentro de las ${hoursLimit} horas posteriores a la compra.`,
+      error: 'No puedes crear un reclamo antes de que ocurra el evento',
+      eventDate: eventDate,
+    });
+  }
+  
+  const hoursSinceEvent = (currentTime.getTime() - eventDate.getTime()) / (1000 * 60 * 60);
+  
+  if (hoursSinceEvent > hoursLimit) {
+    const deadlineDate = new Date(eventDate.getTime() + hoursLimit * 60 * 60 * 1000);
+    return res.status(400).json({ 
+      error: `El plazo para crear un reclamo ha expirado. Solo puedes reclamar dentro de las ${hoursLimit} horas posteriores al evento.`,
+      eventDate: eventDate,
+      deadline: deadlineDate,
+      hoursLimit: hoursLimit,
     });
   }
 
