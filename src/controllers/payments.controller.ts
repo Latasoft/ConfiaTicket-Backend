@@ -414,10 +414,12 @@ export async function commitPayment(req: Request, res: Response) {
 
     // Procesar reserva: generar PDFs (OWN) o marcar vendido (RESALE)
     if (isApproved && !isOwnEvent && payment.reservationId) {
+      console.log('🔵 [COMMIT] Procesando reserva:', payment.reservationId);
       try {
         await processReservationAfterPayment(payment.reservationId);
+        console.log('✅ [COMMIT] Reserva procesada exitosamente');
       } catch (pdfError) {
-        console.error('Error procesando reserva después del pago:', pdfError);
+        console.error('❌ [COMMIT] Error procesando reserva:', pdfError);
         // No fallar la respuesta, el pago ya se confirmó
       }
     }
@@ -435,10 +437,15 @@ export async function commitPayment(req: Request, res: Response) {
         : 'Pago procesado.',
     };
 
+    console.log('🔵 [COMMIT] Payload creado:', payload);
+    console.log('🔵 [COMMIT] WEBPAY_FINAL_URL:', env.WEBPAY_FINAL_URL);
+
     if (env.WEBPAY_FINAL_URL) {
       // Redirigir a la vista del evento con modal de éxito
       const eventId = payment.reservation?.eventId;
+      console.log('🔵 [COMMIT] EventID para redirección:', eventId);
       if (eventId && payload.ok) {
+        console.log('🔵 [COMMIT] Construyendo URL de redirección exitosa...');
         // Construir URL: /eventos/:id?showPurchaseSuccess=true&reservationId=X
         // Normalizar base URL (remover /eventos o /payment-result si existen)
         let baseUrl = env.WEBPAY_FINAL_URL.replace(/\/payment-result\/?$/, '').replace(/\/eventos\/?$/, '');
@@ -449,10 +456,11 @@ export async function commitPayment(req: Request, res: Response) {
         if (payment.reservation?.purchaseGroupId) {
           u.searchParams.set('purchaseGroupId', payment.reservation.purchaseGroupId);
         }
-        console.log('Redirigiendo a:', u.toString());
+        console.log('✅ [COMMIT] Redirigiendo a:', u.toString());
         return res.redirect(303, u.toString());
       }
       
+      console.log('⚠️ [COMMIT] Usando fallback de redirección...');
       // Fallback: ruta legacy payment-result (solo para errores)
       let baseUrl = env.WEBPAY_FINAL_URL.replace(/\/payment-result\/?$/, '').replace(/\/eventos\/?$/, '');
       const u = new URL(`${baseUrl}/payment-result`);
@@ -461,10 +469,11 @@ export async function commitPayment(req: Request, res: Response) {
       u.searchParams.set('buyOrder', payment.buyOrder || '');
       u.searchParams.set('amount', String(payment.amount));
       if (payment.reservationId) u.searchParams.set('reservationId', String(payment.reservationId));
-      console.log('Redirigiendo a fallback:', u.toString());
+      console.log('⚠️ [COMMIT] Redirigiendo a fallback:', u.toString());
       return res.redirect(303, u.toString());
     }
 
+    console.log('⚠️ [COMMIT] No hay WEBPAY_FINAL_URL, devolviendo JSON');
     return res.status(payload.ok ? 200 : (isOwnEvent ? 403 : 200)).json(payload);
   } catch (err: any) {
     console.error('commitPayment error:', err);
