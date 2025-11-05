@@ -3,11 +3,12 @@ import { Request, Response } from "express";
 import prisma from "../prisma/client";
 import { Prisma } from "@prisma/client";
 import { processReservationAfterPayment } from "../services/reservation.service";
-import { getTicketLimits, getPlatformFeeBps } from "../services/config.service";
+import { getTicketLimits, getPlatformFeeBps, getReservationHoldMinutes } from "../services/config.service";
 import crypto from "crypto";
 
 type Authed = Request & { user?: { id: number; role: string; verifiedOrganizer?: boolean } };
 
+// DEPRECADO: Usar getReservationHoldMinutes() en su lugar
 const HOLD_MINUTES = 10;
 
 /* ===================== Helpers ===================== */
@@ -261,7 +262,9 @@ export async function holdReservation(req: Authed, res: Response) {
           }
         }
 
-        const expiresAt = new Date(Date.now() + HOLD_MINUTES * 60_000);
+        // Obtener tiempo de hold desde configuración (DB > ENV > Default)
+        const holdMinutes = await getReservationHoldMinutes();
+        const expiresAt = new Date(Date.now() + holdMinutes * 60_000);
         const purchaseGroupId = crypto.randomUUID();
 
         // Obtener comisión de la plataforma
@@ -330,13 +333,15 @@ export async function holdReservation(req: Authed, res: Response) {
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
     );
 
+    const holdMinutes = await getReservationHoldMinutes();
+
     return res.json({ 
       ok: true, 
       purchaseGroupId: result.purchaseGroupId,
       reservations: result.reservations,
       totalAmount: result.totalAmount,
       totalQuantity: result.totalQuantity,
-      holdMinutes: HOLD_MINUTES,
+      holdMinutes: holdMinutes,
       // Compatibilidad con frontend antiguo
       booking: result.reservations[0],
     });
