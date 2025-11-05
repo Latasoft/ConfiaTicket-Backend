@@ -43,6 +43,7 @@ import organizerTicketValidationRoutes from './routes/organizer.ticketValidation
 import resaleTicketValidationRoutes from './routes/resaleTicketValidation.routes';
 import claimsRoutes from './routes/claims.routes';
 import documentsRoutes from './routes/documents.routes';
+import testRoutes from './routes/test.routes';
 
 import { startPayoutsReconcileJob } from './jobs/payouts.reconcile.job';
 import { startPayoutsRetryJob } from './jobs/payouts.retry.job';
@@ -235,6 +236,9 @@ app.use('/api/admin/config', adminConfigRoutes);
 app.use('/api/payments', paymentsRoutes);
 app.use('/api/claims', claimsRoutes);
 app.use('/api/documents', documentsRoutes);
+
+// ⭐ Test endpoints (solo dev/admin)
+app.use('/api/test', testRoutes);
 
 // ⭐ PSP Marketplace (split/escrow)
 app.use('/api/psp', pspRoutes);

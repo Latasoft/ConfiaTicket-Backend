@@ -17,28 +17,65 @@ function initializeTransporter() {
     return null;
   }
 
-  const config = {
+  // ⚡ Configuración optimizada para Gmail en entornos cloud (Render, Heroku, etc.)
+  const config: any = {
     host: env.SMTP_HOST,
     port: env.SMTP_PORT,
-    secure: env.SMTP_SECURE,
+    secure: env.SMTP_SECURE, // true para 465, false para 587
     auth: {
       user: env.SMTP_USER,
       pass: env.SMTP_PASS,
     },
+    // 🔧 Configuraciones críticas para evitar timeouts en cloud
+    pool: true, // Usar pool de conexiones para mejor rendimiento
+    maxConnections: 5, // Máximo de conexiones simultáneas
+    maxMessages: 100, // Mensajes por conexión antes de recrear
+    rateDelta: 1000, // Ventana de tiempo para rate limiting (1 seg)
+    rateLimit: 5, // Máximo 5 emails por segundo
+    
+    // ⏱️ Timeouts agresivos para fallar rápido en vez de colgar
+    connectionTimeout: 10000, // 10 segundos (por defecto es 2 min)
+    greetingTimeout: 5000, // 5 segundos
+    socketTimeout: 15000, // 15 segundos
+    
+    // 🔒 Configuraciones de seguridad para Gmail
+    tls: {
+      // No fallar en certificados autofirmados (común en cloud)
+      rejectUnauthorized: false,
+      // Forzar TLS 1.2+
+      minVersion: 'TLSv1.2',
+    },
+    
+    // 📝 Debug mode (útil para troubleshooting)
+    logger: process.env.NODE_ENV === 'development',
+    debug: process.env.NODE_ENV === 'development',
   };
 
   const transport = nodemailer.createTransport(config);
 
-  // Verificar conexión al iniciar
+  // Verificar conexión al iniciar con timeout
+  const verifyTimeout = setTimeout(() => {
+    console.warn('⚠️ SMTP verify tomó más de 10 segundos, puede haber problemas de red');
+  }, 10000);
+
   transport.verify((error) => {
+    clearTimeout(verifyTimeout);
+    
     if (error) {
-      console.error('Error de conexión SMTP:', error.message);
+      console.error('❌ Error de conexión SMTP:', error.message);
       console.error('   Verifica tus credenciales y configuración en .env');
+      console.error('   Si usas Gmail, asegúrate de:');
+      console.error('   1. Usar "Contraseña de aplicación" (no la contraseña normal)');
+      console.error('   2. SMTP_HOST=smtp.gmail.com');
+      console.error('   3. SMTP_PORT=587 y SMTP_SECURE=false (STARTTLS)');
+      console.error('   O bien: SMTP_PORT=465 y SMTP_SECURE=true (SSL/TLS directo)');
     } else {
-      console.log('SMTP configurado correctamente');
+      console.log('✅ SMTP configurado correctamente');
       console.log(`   Host: ${env.SMTP_HOST}`);
+      console.log(`   Port: ${env.SMTP_PORT} (secure: ${env.SMTP_SECURE})`);
       console.log(`   User: ${env.SMTP_USER}`);
       console.log(`   From: ${env.MAIL_FROM || env.SMTP_USER}`);
+      console.log(`   Pool: enabled (max ${config.maxConnections} connections)`);
     }
   });
 
@@ -66,34 +103,74 @@ function formatAmount(amount: number): string {
 }
 
 /**
- * Envía un email (wrapper interno)
+ * Envía un email (wrapper interno) con retry logic
  */
 async function sendEmail(options: {
   to: string;
   subject: string;
   html: string;
   attachments?: any[];
-}): Promise<boolean> {
+}, retries = 3): Promise<boolean> {
   if (!transporter) {
     console.warn(`No se pudo enviar email a ${options.to}: SMTP no configurado`);
     return false;
   }
 
-  try {
-    await transporter.sendMail({
-      from: env.MAIL_FROM || env.SMTP_USER,
-      to: options.to,
-      subject: options.subject,
-      html: options.html,
-      attachments: options.attachments,
-    });
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const info = await transporter.sendMail({
+        from: env.MAIL_FROM || env.SMTP_USER,
+        to: options.to,
+        subject: options.subject,
+        html: options.html,
+        attachments: options.attachments,
+      });
 
-    console.log(`Email enviado a ${options.to}: ${options.subject}`);
-    return true;
-  } catch (error: any) {
-    console.error(`Error enviando email a ${options.to}:`, error.message);
-    return false;
+      console.log(`✅ Email enviado a ${options.to}: ${options.subject}`);
+      console.log(`   MessageID: ${info.messageId}`);
+      console.log(`   Response: ${info.response}`);
+      return true;
+      
+    } catch (error: any) {
+      const isLastAttempt = attempt === retries;
+      
+      // Errores recuperables (reintentar)
+      const isRetriable = 
+        error.code === 'ETIMEDOUT' || 
+        error.code === 'ECONNRESET' ||
+        error.code === 'ENOTFOUND' ||
+        error.code === 'ESOCKET' ||
+        error.responseCode >= 400;
+
+      if (isLastAttempt || !isRetriable) {
+        console.error(`❌ Error enviando email a ${options.to} (intento ${attempt}/${retries}):`, error.message);
+        console.error(`   Code: ${error.code || 'N/A'}`);
+        console.error(`   Response: ${error.response || 'N/A'}`);
+        
+        // Logging detallado para troubleshooting
+        if (error.code === 'ETIMEDOUT') {
+          console.error('   💡 Timeout - Posibles causas:');
+          console.error('      - Firewall de Render bloqueando puerto SMTP');
+          console.error('      - Configuración incorrecta de puerto/secure');
+          console.error('      - Gmail bloqueando la IP de Render');
+        } else if (error.code === 'EAUTH') {
+          console.error('   💡 Autenticación fallida - Verifica:');
+          console.error('      - Usar "Contraseña de aplicación" no contraseña normal');
+          console.error('      - SMTP_USER debe ser el email completo');
+        }
+        
+        return false;
+      }
+
+      // Esperar antes de reintentar (backoff exponencial)
+      const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+      console.warn(`⚠️ Reintento ${attempt}/${retries} para ${options.to} en ${backoffMs}ms...`);
+      console.warn(`   Error: ${error.message}`);
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+    }
   }
+
+  return false;
 }
 
 /* =================== TEMPLATES DE EMAILS =================== */
