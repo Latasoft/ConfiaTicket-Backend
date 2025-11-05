@@ -1,6 +1,6 @@
 // src/routes/test.routes.ts
 import { Router } from 'express';
-import { authenticateToken } from '../middleware/auth';
+import { authenticateToken } from '../middleware/authMiddleware';
 import { testEmail, getSmtpConfig } from '../controllers/email.test.controller';
 
 const router = Router();
