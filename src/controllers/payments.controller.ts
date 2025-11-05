@@ -7,6 +7,7 @@ import path from 'path';
 // ⬇️ Provider de payouts (http/sim)
 import { getPayoutProvider } from '../services/payouts/provider';
 import { processReservationAfterPayment } from '../services/reservation.service';
+import { getPlatformFeeBps, getReservationHoldMinutes } from '../services/config.service';
 import crypto from 'crypto';
 
 // Transbank SDK (Node)
@@ -62,10 +63,10 @@ function tbkTx() {
   const envName = (env.WEBPAY_ENV || 'INTEGRATION').toUpperCase();
   const isProd = envName === 'PRODUCTION';
 
-  // En integración, para captura diferida usar el código DEFERRED
+  // Webpay Plus Normal
   const commerceCode = isProd
     ? (env.WEBPAY_COMMERCE_CODE || '')
-    : IntegrationCommerceCodes.WEBPAY_PLUS_DEFERRED;
+    : IntegrationCommerceCodes.WEBPAY_PLUS;
 
   const apiKey = isProd
     ? (env.WEBPAY_API_KEY || '')
@@ -213,7 +214,7 @@ export async function createPayment(req: Request, res: Response) {
             sessionId,
             environment: env.WEBPAY_ENV || 'INTEGRATION',
             commerceCode: commerceCodeForEnv,
-            isDeferredCapture: true,
+            isDeferredCapture: false, // Captura inmediata
           },
         });
       }
@@ -323,13 +324,7 @@ export async function commitPayment(req: Request, res: Response) {
       !!payment.reservation &&
       payment.reservation.event?.organizerId === payment.reservation.buyerId;
 
-    // Si autorizado correctamente, fijamos expiración de la autorización
-    const authExpiresAt = isApproved ? hoursFrom(now(), AUTH_HOLD_HOURS) : null;
-
-    // Plazo para que el vendedor suba el/los tickets
-    const uploadDeadline = isApproved ? hoursFrom(now(), UPLOAD_DEADLINE_HOURS) : null;
-
-    // NUEVO: detectar cuenta conectada del organizador para enrutar payout
+    // Detectar cuenta conectada del organizador para enrutar payout
     let destAccountId: number | null = null;
     if (isApproved && !isOwnEvent && payment.reservation?.event?.organizerId) {
       const acct = await prisma.connectedAccount.findUnique({
@@ -337,15 +332,21 @@ export async function commitPayment(req: Request, res: Response) {
       });
       if (acct && acct.payoutsEnabled) destAccountId = acct.id;
     }
-    // Mantener si ya existía (no sobreescribir con null)
     const finalDestAccountId = payment.destinationAccountId ?? destAccountId ?? null;
 
+    // Calcular comisión de plataforma para el payout
+    const platformFeeBps = await getPlatformFeeBps();
+    const subtotal = payment.amount;
+    const applicationFeeAmount = Math.round(subtotal * platformFeeBps / 10000);
+    const netAmount = Math.max(0, subtotal - applicationFeeAmount);
+
     await prisma.$transaction(async (txp) => {
-      // Registra la info devuelta por TBK
+      // Actualizar Payment con información de Transbank
       await txp.payment.update({
         where: { id: payment.id },
         data: {
-          status: isApproved && !isOwnEvent ? 'AUTHORIZED' : 'FAILED',
+          // Captura inmediata: COMMITTED (no AUTHORIZED)
+          status: isApproved && !isOwnEvent ? 'COMMITTED' : 'FAILED',
           authorizationCode: (commit as any)?.authorization_code || null,
           paymentTypeCode: (commit as any)?.payment_type_code || null,
           installmentsNumber: (commit as any)?.installments_number ?? null,
@@ -356,28 +357,52 @@ export async function commitPayment(req: Request, res: Response) {
             ? String((commit as any).card_detail.card_number).slice(-4)
             : null,
           vci: (commit as any)?.vci || null,
-          authorizedAmount: isApproved ? payment.amount : null,
-          authorizationExpiresAt: authExpiresAt,
           destinationAccountId: finalDestAccountId,
+          applicationFeeAmount,
+          netAmount,
         },
       });
 
-      // Reserva: no pasamos a PAID; dejamos WAITING_TICKET y fijamos deadlines
+      // Marcar Reservation como PAID inmediatamente
       if (payment.reservationId) {
         await txp.reservation.update({
           where: { id: payment.reservationId },
           data: isApproved && !isOwnEvent
             ? {
-                // mantenemos PENDING_PAYMENT (no pagado)
-                fulfillmentStatus: 'WAITING_TICKET',
-                ticketUploadDeadlineAt: uploadDeadline,
-                // extendemos el hold de cupos al vencimiento de la autorización
-                expiresAt: authExpiresAt,
+                status: 'PAID',
+                paidAt: now(),
+                fulfillmentStatus: 'TICKET_APPROVED',
+                approvedAt: now(),
               }
             : { status: 'CANCELED' },
         });
       }
+
+      // Crear Payout PENDING si hay cuenta conectada
+      if (isApproved && !isOwnEvent && finalDestAccountId && payment.reservationId) {
+        await txp.payout.create({
+          data: {
+            accountId: finalDestAccountId,
+            reservationId: payment.reservationId,
+            paymentId: payment.id,
+            amount: netAmount,
+            status: 'PENDING',
+            currency: 'CLP',
+            idempotencyKey: newIdempotencyKey(),
+          },
+        });
+      }
     });
+
+    // Procesar reserva: generar PDFs (OWN) o marcar vendido (RESALE)
+    if (isApproved && !isOwnEvent && payment.reservationId) {
+      try {
+        await processReservationAfterPayment(payment.reservationId);
+      } catch (pdfError) {
+        console.error('Error procesando reserva después del pago:', pdfError);
+        // No fallar la respuesta, el pago ya se confirmó
+      }
+    }
 
     const payload: any = {
       ok: isApproved && !isOwnEvent,
@@ -387,20 +412,34 @@ export async function commitPayment(req: Request, res: Response) {
       authorizationCode: (commit as any)?.authorization_code,
       responseCode: (commit as any)?.response_code,
       reservationId: payment.reservationId,
-      authorizationExpiresAt: authExpiresAt,
-      uploadDeadlineAt: uploadDeadline,
-      note: 'Pago pre-autorizado. Se capturará cuando el admin apruebe el/los ticket(s).',
+      note: isApproved && !isOwnEvent 
+        ? 'Pago confirmado. Tu entrada está lista para descargar.' 
+        : 'Pago procesado.',
     };
 
     if (env.WEBPAY_FINAL_URL) {
+      // Redirigir a la vista del evento con modal de éxito
+      const eventId = payment.reservation?.eventId;
+      if (eventId && payload.ok) {
+        // Construir URL: /eventos/:id?showPurchaseSuccess=true&reservationId=X
+        const baseUrl = env.WEBPAY_FINAL_URL.replace('/payment-result', '');
+        const eventUrl = `${baseUrl}/eventos/${eventId}`;
+        const u = new URL(eventUrl);
+        u.searchParams.set('showPurchaseSuccess', 'true');
+        u.searchParams.set('reservationId', String(payment.reservationId));
+        if (payment.reservation?.purchaseGroupId) {
+          u.searchParams.set('purchaseGroupId', payment.reservation.purchaseGroupId);
+        }
+        return res.redirect(303, u.toString());
+      }
+      
+      // Fallback: ruta legacy payment-result (solo para errores)
       const u = new URL(env.WEBPAY_FINAL_URL);
-      u.searchParams.set('status', payload.ok ? 'authorized' : (isOwnEvent ? 'own-event-forbidden' : 'failed'));
+      u.searchParams.set('status', payload.ok ? 'success' : (isOwnEvent ? 'own-event-forbidden' : 'failed'));
       u.searchParams.set('token', token);
       u.searchParams.set('buyOrder', payment.buyOrder || '');
       u.searchParams.set('amount', String(payment.amount));
       if (payment.reservationId) u.searchParams.set('reservationId', String(payment.reservationId));
-      if (authExpiresAt) u.searchParams.set('authorizationExpiresAt', authExpiresAt.toISOString());
-      if (uploadDeadline) u.searchParams.set('uploadDeadlineAt', uploadDeadline.toISOString());
       return res.redirect(303, u.toString());
     }
 
