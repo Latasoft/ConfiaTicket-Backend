@@ -251,3 +251,51 @@ export async function updateSystemConfig(req: Request, res: Response) {
   clearConfigCache();
   res.json(updated);
 }
+
+export async function getReservationHold(_req: Request, res: Response) {
+  const hold = await prisma.reservationHoldConfig.findFirst();
+  res.json(hold);
+}
+
+export async function updateReservationHold(req: Request, res: Response) {
+  const { holdMinutes, description } = req.body as {
+    holdMinutes: number;
+    description?: string;
+  };
+
+  const errors: string[] = [];
+
+  if (typeof holdMinutes !== 'number' || holdMinutes < 1) {
+    errors.push('holdMinutes debe ser un numero mayor a 0');
+  }
+  if (holdMinutes > 60) {
+    errors.push('holdMinutes no puede ser mayor a 60 (1 hora)');
+  }
+
+  if (errors.length) {
+    return res.status(400).json({ error: 'Datos invalidos', details: errors });
+  }
+
+  const existing = await prisma.reservationHoldConfig.findFirst();
+
+  let updated;
+  if (existing) {
+    updated = await prisma.reservationHoldConfig.update({
+      where: { id: existing.id },
+      data: { 
+        holdMinutes,
+        ...(description !== undefined ? { description } : {}),
+      },
+    });
+  } else {
+    updated = await prisma.reservationHoldConfig.create({
+      data: { 
+        holdMinutes,
+        description: description || 'Tiempo en minutos que una reserva se mantiene bloqueada antes de expirar',
+      },
+    });
+  }
+
+  clearConfigCache();
+  res.json(updated);
+}
