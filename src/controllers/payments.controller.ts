@@ -307,9 +307,13 @@ export async function commitPayment(req: Request, res: Response) {
 
     if (!token) return res.status(400).json({ error: 'token_ws faltante' });
 
+    console.log('🔵 [COMMIT] Token recibido:', token);
+
     // Ejecuta commit en Webpay
     const tx = tbkTx();
+    console.log('🔵 [COMMIT] Llamando a Transbank commit...');
     const commit = await tx.commit(token);
+    console.log('🔵 [COMMIT] Respuesta de Transbank:', JSON.stringify(commit, null, 2));
 
     const payment = await prisma.payment.findUnique({
       where: { token },
@@ -322,7 +326,11 @@ export async function commitPayment(req: Request, res: Response) {
         },
       },
     });
+    
+    console.log('🔵 [COMMIT] Payment encontrado:', payment ? `ID: ${payment.id}, Status: ${payment.status}` : 'NO ENCONTRADO');
+    
     if (!payment) {
+      console.error('❌ [COMMIT] ERROR: Transacción no encontrada para token:', token);
       return res.status(404).json({ error: 'Transacción no encontrada' });
     }
 
@@ -330,6 +338,9 @@ export async function commitPayment(req: Request, res: Response) {
     const isOwnEvent =
       !!payment.reservation &&
       payment.reservation.event?.organizerId === payment.reservation.buyerId;
+
+    console.log('🔵 [COMMIT] isApproved:', isApproved, 'isOwnEvent:', isOwnEvent);
+    console.log('🔵 [COMMIT] response_code:', commit.response_code);
 
     // Detectar cuenta conectada del organizador para enrutar payout
     let destAccountId: number | null = null;
