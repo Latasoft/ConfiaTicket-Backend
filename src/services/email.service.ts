@@ -1,8 +1,18 @@
 // src/services/email.service.ts
 import nodemailer from 'nodemailer';
+import sgMail from '@sendgrid/mail';
 import { env } from '../config/env';
 
-// Crear transporter reutilizable
+// Determinar si usar SendGrid API o SMTP
+const USE_SENDGRID_API = !!process.env.SENDGRID_API_KEY;
+
+// Inicializar SendGrid si está configurado
+if (USE_SENDGRID_API) {
+  sgMail.setApiKey(process.env.SENDGRID_API_KEY!);
+  console.log('✅ SendGrid API configurado');
+}
+
+// Crear transporter reutilizable (solo si usamos SMTP)
 let transporter: nodemailer.Transporter | null = null;
 
 /**
@@ -10,10 +20,17 @@ let transporter: nodemailer.Transporter | null = null;
  * Se llama automáticamente al importar el módulo
  */
 function initializeTransporter() {
+  // Si usamos SendGrid API, no necesitamos SMTP
+  if (USE_SENDGRID_API) {
+    console.log('📧 Usando SendGrid API para envío de emails');
+    return null;
+  }
+
   // Validar que las variables de entorno estén configuradas
   if (!env.SMTP_HOST || !env.SMTP_USER || !env.SMTP_PASS) {
     console.warn('SMTP no configurado. Los emails no se enviarán.');
     console.warn('Configura SMTP_HOST, SMTP_USER y SMTP_PASS en .env');
+    console.warn('O configura SENDGRID_API_KEY para usar SendGrid API');
     return null;
   }
 
@@ -104,8 +121,86 @@ function formatAmount(amount: number): string {
 
 /**
  * Envía un email (wrapper interno) con retry logic
+ * Usa SendGrid API si está configurado, sino usa SMTP
  */
 async function sendEmail(options: {
+  to: string;
+  subject: string;
+  html: string;
+  attachments?: any[];
+}, retries = 3): Promise<boolean> {
+  
+  // 🚀 Usar SendGrid API si está configurado
+  if (USE_SENDGRID_API) {
+    return sendEmailWithSendGrid(options, retries);
+  }
+
+  // 📧 Fallback a SMTP
+  return sendEmailWithSMTP(options, retries);
+}
+
+/**
+ * Envía email usando SendGrid API
+ */
+async function sendEmailWithSendGrid(options: {
+  to: string;
+  subject: string;
+  html: string;
+  attachments?: any[];
+}, retries = 3): Promise<boolean> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const msg: any = {
+        to: options.to,
+        from: {
+          email: env.MAIL_FROM || env.SMTP_USER || 'noreply@confiaticket.cl',
+          name: 'ConfiaTicket',
+        },
+        subject: options.subject,
+        html: options.html,
+      };
+
+      // Agregar attachments si existen
+      if (options.attachments && options.attachments.length > 0) {
+        msg.attachments = options.attachments.map((att: any) => ({
+          content: att.content.toString('base64'),
+          filename: att.filename,
+          type: att.contentType || 'application/octet-stream',
+          disposition: 'attachment',
+        }));
+      }
+
+      await sgMail.send(msg);
+      
+      console.log(`✅ Email enviado via SendGrid a ${options.to}: ${options.subject}`);
+      return true;
+      
+    } catch (error: any) {
+      const isLastAttempt = attempt === retries;
+      
+      if (isLastAttempt) {
+        console.error(`❌ Error enviando email via SendGrid a ${options.to} (intento ${attempt}/${retries}):`, error.message);
+        if (error.response) {
+          console.error(`   Status: ${error.response.statusCode}`);
+          console.error(`   Body:`, error.response.body);
+        }
+        return false;
+      }
+      
+      // Esperar antes de reintentar (backoff exponencial)
+      const delay = Math.pow(2, attempt - 1) * 1000; // 1s, 2s, 4s
+      console.warn(`⚠️ Reintentando email a ${options.to} en ${delay}ms (intento ${attempt}/${retries})`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Envía email usando SMTP (nodemailer)
+ */
+async function sendEmailWithSMTP(options: {
   to: string;
   subject: string;
   html: string;
@@ -126,7 +221,7 @@ async function sendEmail(options: {
         attachments: options.attachments,
       });
 
-      console.log(`✅ Email enviado a ${options.to}: ${options.subject}`);
+      console.log(`✅ Email enviado via SMTP a ${options.to}: ${options.subject}`);
       console.log(`   MessageID: ${info.messageId}`);
       console.log(`   Response: ${info.response}`);
       return true;
