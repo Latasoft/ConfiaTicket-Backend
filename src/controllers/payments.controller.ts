@@ -412,16 +412,20 @@ export async function commitPayment(req: Request, res: Response) {
       }
     });
 
+    console.log('✅ [COMMIT] Transacción actualizada en BD');
+
     // Procesar reserva: generar PDFs (OWN) o marcar vendido (RESALE)
     if (isApproved && !isOwnEvent && payment.reservationId) {
-      console.log('🔵 [COMMIT] Procesando reserva:', payment.reservationId);
-      try {
-        await processReservationAfterPayment(payment.reservationId);
-        console.log('✅ [COMMIT] Reserva procesada exitosamente');
-      } catch (pdfError) {
-        console.error('❌ [COMMIT] Error procesando reserva:', pdfError);
-        // No fallar la respuesta, el pago ya se confirmó
-      }
+      console.log('🔵 [COMMIT] Iniciando procesamiento asíncrono de reserva:', payment.reservationId);
+      
+      // No esperar (fire and forget) - la redirección debe ser inmediata
+      processReservationAfterPayment(payment.reservationId)
+        .then(() => {
+          console.log('✅ [COMMIT] Reserva procesada exitosamente (async)');
+        })
+        .catch((pdfError) => {
+          console.error('❌ [COMMIT] Error procesando reserva (async):', pdfError);
+        });
     }
 
     const payload: any = {
@@ -593,14 +597,15 @@ export async function capturePayment(req: Request, res: Response) {
       return { pay, resv, payout };
     });
 
-    // Procesar reserva FUERA de la transacción para evitar timeout
-    // (generar PDF para OWN, marcar vendido para RESALE)
-    try {
-      await processReservationAfterPayment(updated.resv.id);
-    } catch (pdfError) {
-      console.error('Error procesando reserva después del pago:', pdfError);
-      // No fallar la respuesta, el pago ya se confirmó
-    }
+    // Procesar reserva de forma asíncrona 
+    processReservationAfterPayment(updated.resv.id)
+      .then(() => {
+        console.log('✅ [OWN_EVENT] Reserva procesada exitosamente (async):', updated.resv.id);
+      })
+      .catch((pdfError) => {
+        console.error('❌ [OWN_EVENT] Error procesando reserva (async):', pdfError);
+        // No afecta la respuesta, el pago ya se confirmó
+      });
 
     return res.status(200).json({
       ok: true,
