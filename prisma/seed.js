@@ -114,6 +114,20 @@ async function seedConfig() {
     });
   }
   // Si ya existe, NO tocar (permite edición desde admin panel)
+
+  // Reservation Hold Config - SOLO crear si no existe
+  const reservationHoldExists = await prisma.reservationHoldConfig.findFirst();
+  if (!reservationHoldExists) {
+    const holdMinutesFromEnv = process.env.RESERVATION_HOLD_MINUTES ? parseInt(process.env.RESERVATION_HOLD_MINUTES) : null;
+    const defaultHoldMinutes = 15;
+    
+    await prisma.reservationHoldConfig.create({
+      data: {
+        holdMinutes: holdMinutesFromEnv ?? defaultHoldMinutes,
+        description: 'Tiempo en minutos que una reserva se mantiene bloqueada antes de expirar',
+      },
+    });
+  }
 }
 
 async function main() {

@@ -867,6 +867,13 @@ model FieldLimitConfig {
   @@index([context])
 }
 
+model ReservationHoldConfig {
+  id                Int      @id @default(autoincrement())
+  holdMinutes       Int      @default(15)    // Minutos que dura el hold de una reserva
+  description       String?  @db.VarChar(500)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt @default(now())
+}
 
 
 

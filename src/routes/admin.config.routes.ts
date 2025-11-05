@@ -8,6 +8,8 @@ import {
   updatePriceLimit,
   getPlatformFee,
   updatePlatformFee,
+  getReservationHold,
+  updateReservationHold,
   listFieldLimits,
   updateFieldLimit,
   listSystemConfigs,
@@ -24,6 +26,9 @@ router.put('/price-limit', authenticateToken, requireSuperadmin, updatePriceLimi
 
 router.get('/platform-fee', authenticateToken, requireSuperadmin, getPlatformFee);
 router.put('/platform-fee', authenticateToken, requireSuperadmin, updatePlatformFee);
+
+router.get('/reservation-hold', authenticateToken, requireSuperadmin, getReservationHold);
+router.put('/reservation-hold', authenticateToken, requireSuperadmin, updateReservationHold);
 
 router.get('/field-limits', authenticateToken, requireSuperadmin, listFieldLimits);
 router.put('/field-limits/:fieldName', authenticateToken, requireSuperadmin, updateFieldLimit);

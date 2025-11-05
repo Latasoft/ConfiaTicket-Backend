@@ -1,5 +1,6 @@
 // src/services/config.service.ts
 import prisma from '../prisma/client';
+import { env } from '../config/env';
 
 let configCache: {
   ticketLimits?: any;
@@ -7,6 +8,7 @@ let configCache: {
   platformFee?: any;
   fieldLimits?: any;
   businessRules?: any;
+  reservationHold?: any;
   lastFetch?: number;
 } = {};
 
@@ -19,12 +21,13 @@ async function refreshConfigCache() {
     return;
   }
 
-  const [ticketLimits, priceLimit, platformFee, fieldLimits, systemConfigs] = await Promise.all([
+  const [ticketLimits, priceLimit, platformFee, fieldLimits, systemConfigs, reservationHold] = await Promise.all([
     prisma.ticketLimitConfig.findMany(),
     prisma.priceLimitConfig.findFirst(),
     prisma.platformFeeConfig.findFirst(),
     prisma.fieldLimitConfig.findMany(),
     prisma.systemConfig.findMany(),
+    prisma.reservationHoldConfig.findFirst(),
   ]);
 
   configCache.ticketLimits = {};
@@ -65,6 +68,11 @@ async function refreshConfigCache() {
     
     configCache.businessRules[config.key] = value;
   }
+
+  // Configuración de hold de reservas con prioridad: DB > ENV > Default (15)
+  configCache.reservationHold = {
+    holdMinutes: reservationHold?.holdMinutes ?? env.RESERVATION_HOLD_MINUTES ?? 15,
+  };
 
   configCache.lastFetch = now;
 }
@@ -119,6 +127,15 @@ export async function getAllowedAccountTypes(): Promise<string[]> {
   const rules = await getBusinessRules();
   const value = rules['ALLOWED_ACCOUNT_TYPES'] || 'corriente,vista,ahorro,rut';
   return value.split(',').map((s: string) => s.trim());
+}
+
+/**
+ * Obtiene el tiempo de hold de reservas en minutos
+ * Prioridad: DB > ENV > Default (15)
+ */
+export async function getReservationHoldMinutes(): Promise<number> {
+  await refreshConfigCache();
+  return configCache.reservationHold?.holdMinutes ?? 15;
 }
 
 export function clearConfigCache() {
