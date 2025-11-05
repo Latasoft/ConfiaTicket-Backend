@@ -10,17 +10,17 @@ import {
   logoutAll,
   changeEmail, // 👈 NUEVO
 } from '../controllers/auth.controller';
-import { authLimiter } from '../middleware/rateLimit'; // Rate limiter para proteger endpoints públicos
+import { authLimiter, strictAuthLimiter } from '../middleware/rateLimit'; // Rate limiters diferenciados
 
 const router = Router();
 
 /**
  * Endpoints públicos protegidos con rate limit
  * - register: crea usuario nuevo (solo buyer/organizer)
- * - login: autentica y devuelve token
+ * - login: autentica y devuelve token (limiter estricto)
  */
 router.post('/register', authLimiter, register);
-router.post('/login', authLimiter, login);
+router.post('/login', strictAuthLimiter, login); // ⭐ Limiter más estricto para login
 
 /**
  * Perfil actual del usuario autenticado

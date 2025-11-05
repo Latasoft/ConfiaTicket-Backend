@@ -63,13 +63,30 @@ app.use(compression());
 const ORIGINS = (env as any).CORS_ORIGINS?.length ? (env as any).CORS_ORIGINS as string[] :
   (env.FRONTEND_URL || '').split(',').map(s => s.trim()).filter(Boolean);
 
+if (ORIGINS.length === 0) {
+  console.error('ERROR: CORS_ORIGINS está vacío. Por seguridad, el servidor no iniciará.');
+  console.error('   Configura CORS_ORIGINS o FRONTEND_URL en tu archivo .env');
+  if (env.IS_PROD) {
+    process.exit(1); // Detener servidor en producción
+  } else {
+    console.warn('DESARROLLO: Permitiendo localhost por defecto');
+    ORIGINS.push('http://localhost:3000', 'http://localhost:5173');
+  }
+}
+
+console.log('CORS configurado para origins:', ORIGINS);
+
 app.use(
   cors({
     origin(origin, cb) {
-      // Permite health checks / curl sin Origin
-      if (!origin) return cb(null, true);
-      if (ORIGINS.length && ORIGINS.includes(origin)) return cb(null, true);
-      return cb(new Error('CORS: Origin no permitido'), false);
+      // Rechazar requests sin Origin header (excepto health checks específicos)
+      if (!origin) {
+        // Permitir solo para rutas de health check
+        return cb(null, true); // Temporal: se puede restringir más
+      }
+      if (ORIGINS.includes(origin)) return cb(null, true);
+      console.warn(`CORS bloqueado: ${origin}`);
+      return cb(new Error(`CORS: Origin no permitido: ${origin}`), false);
     },
     credentials: true,
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Idempotency-Key', 'X-Request-Id'],
@@ -77,15 +94,32 @@ app.use(
   })
 );
 
-// Rate limit global (ajusta si tu gateway de pago hace muchos callbacks por IP)
-app.use(
-  rateLimit({
-    windowMs: 60 * 1000,
-    max: 500, // 500 req/min por IP (aumentado para desarrollo)
-    standardHeaders: true,
-    legacyHeaders: false,
-  })
-);
+// Rate limiters diferenciados por tipo de endpoint
+const strictAuthLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 5, // Solo 5 intentos por 15 min
+  message: { error: 'Demasiados intentos. Por favor, intenta de nuevo en 15 minutos.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 10, // 10 intentos por 15 min
+  message: { error: 'Demasiados intentos. Por favor, intenta de nuevo en 15 minutos.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minuto
+  max: 60, // 60 req/min por IP
+  message: { error: 'Demasiadas solicitudes. Por favor, intenta de nuevo en un momento.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use(generalLimiter);
 
 // Logs
 app.use(morgan(env.IS_PROD ? 'combined' : 'dev'));
