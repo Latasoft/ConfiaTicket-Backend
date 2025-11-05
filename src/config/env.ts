@@ -103,6 +103,8 @@ export const env = {
   /* ⏱️ Retención de la pre-autorización (horas) */
   AUTH_HOLD_HOURS: toInt(process.env.AUTH_HOLD_HOURS, 72),
 
+  RESERVATION_HOLD_MINUTES: toInt(process.env.RESERVATION_HOLD_MINUTES, 15),
+
   /* ===== Reventa / Escrow ===== */
   RESALE_ESCROW_UPLOAD_HOURS: toInt(process.env.RESALE_ESCROW_UPLOAD_HOURS, 24),
   RESALE_ESCROW_CONFIRM_HOURS: toInt(process.env.RESALE_ESCROW_CONFIRM_HOURS, 24),
