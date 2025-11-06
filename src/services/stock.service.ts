@@ -13,6 +13,7 @@ export type StockInfo = {
     date: Date;
     approved: boolean;
     eventType: 'OWN' | 'RESALE';
+    isActive: boolean;
   };
   remaining: number;
   hasStarted: boolean;
@@ -37,6 +38,7 @@ export async function getRemainingStock(
       date: true,
       approved: true,
       eventType: true,
+      isActive: true,
     },
   });
 
