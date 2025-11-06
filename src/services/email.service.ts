@@ -8,8 +8,13 @@ const USE_SENDGRID_API = !!process.env.SENDGRID_API_KEY;
 
 // Inicializar SendGrid si está configurado
 if (USE_SENDGRID_API) {
-  sgMail.setApiKey(process.env.SENDGRID_API_KEY!);
-  console.log('✅ SendGrid API configurado');
+  try {
+    sgMail.setApiKey(process.env.SENDGRID_API_KEY!);
+    console.log('✅ SendGrid API configurado');
+  } catch (error) {
+    console.error('❌ Error al configurar SendGrid:', error);
+    console.error('   Verifica que SENDGRID_API_KEY sea válido');
+  }
 }
 
 // Crear transporter reutilizable (solo si usamos SMTP)
@@ -70,37 +75,46 @@ function initializeTransporter() {
 
   const transport = nodemailer.createTransport(config);
 
-  // Verificar conexión al iniciar con timeout
-  const verifyTimeout = setTimeout(() => {
-    console.warn('⚠️ SMTP verify tomó más de 10 segundos, puede haber problemas de red');
-  }, 10000);
+  // Verificar conexión de forma NO bloqueante (async)
+  // No queremos que esto bloquee el inicio del servidor
+  setImmediate(() => {
+    const verifyTimeout = setTimeout(() => {
+      console.warn('⚠️ SMTP verify tomó más de 10 segundos, puede haber problemas de red');
+      console.warn('   El servidor continuará funcionando, pero los emails pueden fallar');
+    }, 10000);
 
-  transport.verify((error) => {
-    clearTimeout(verifyTimeout);
-    
-    if (error) {
-      console.error('❌ Error de conexión SMTP:', error.message);
-      console.error('   Verifica tus credenciales y configuración en .env');
-      console.error('   Si usas Gmail, asegúrate de:');
-      console.error('   1. Usar "Contraseña de aplicación" (no la contraseña normal)');
-      console.error('   2. SMTP_HOST=smtp.gmail.com');
-      console.error('   3. SMTP_PORT=587 y SMTP_SECURE=false (STARTTLS)');
-      console.error('   O bien: SMTP_PORT=465 y SMTP_SECURE=true (SSL/TLS directo)');
-    } else {
-      console.log('✅ SMTP configurado correctamente');
-      console.log(`   Host: ${env.SMTP_HOST}`);
-      console.log(`   Port: ${env.SMTP_PORT} (secure: ${env.SMTP_SECURE})`);
-      console.log(`   User: ${env.SMTP_USER}`);
-      console.log(`   From: ${env.MAIL_FROM || env.SMTP_USER}`);
-      console.log(`   Pool: enabled (max ${config.maxConnections} connections)`);
-    }
+    transport.verify((error) => {
+      clearTimeout(verifyTimeout);
+      
+      if (error) {
+        console.error('❌ Error de conexión SMTP:', error.message);
+        console.error('   Verifica tus credenciales y configuración en .env');
+        console.error('   Si usas Gmail, asegúrate de:');
+        console.error('   1. Usar "Contraseña de aplicación" (no la contraseña normal)');
+        console.error('   2. SMTP_HOST=smtp.gmail.com');
+        console.error('   3. SMTP_PORT=587 y SMTP_SECURE=false (STARTTLS)');
+        console.error('   O bien: SMTP_PORT=465 y SMTP_SECURE=true (SSL/TLS directo)');
+      } else {
+        console.log('✅ SMTP configurado correctamente');
+        console.log(`   Host: ${env.SMTP_HOST}`);
+        console.log(`   Port: ${env.SMTP_PORT} (secure: ${env.SMTP_SECURE})`);
+        console.log(`   User: ${env.SMTP_USER}`);
+        console.log(`   From: ${env.MAIL_FROM || env.SMTP_USER}`);
+        console.log(`   Pool: enabled (max ${config.maxConnections} connections)`);
+      }
+    });
   });
 
   return transport;
 }
 
-// Inicializar al cargar el módulo
-transporter = initializeTransporter();
+// Inicializar al cargar el módulo solo si NO usamos SendGrid
+// Esto evita intentar conectar a SMTP cuando ya tenemos SendGrid configurado
+if (!USE_SENDGRID_API) {
+  transporter = initializeTransporter();
+} else {
+  console.log('📧 Saltando inicialización de SMTP (usando SendGrid API)');
+}
 
 /**
  * Helper para formatear fechas en español
@@ -534,7 +548,8 @@ export async function sendPurchaseNotificationToAdmin(data: {
   }
 
   const formattedAmount = formatAmount(totalAmount);
-  const reservationUrl = `${env.FRONTEND_URL}/admin/reservations/${reservationId}`;
+  // Link al panel de compras del admin con filtro por ID de reserva
+  const purchasesUrl = `${env.FRONTEND_URL}/admin/compras?q=${reservationId}`;
 
   const html = `
     <!DOCTYPE html>
@@ -632,10 +647,14 @@ export async function sendPurchaseNotificationToAdmin(data: {
           </div>
 
           <div style="text-align: center;">
-            <a href="${reservationUrl}" class="button">
-              Ver Detalles en el Panel
+            <a href="${purchasesUrl}" class="button">
+              Ver Compra en el Panel
             </a>
           </div>
+
+          <p style="margin-top: 30px; font-size: 14px; color: #6b7280;">
+            Puedes revisar todos los detalles de esta compra en el panel de administracion.
+          </p>
         </div>
       </div>
     </body>
