@@ -258,7 +258,7 @@ export async function commitPayment(req: Request, res: Response) {
       include: {
         reservation: {
           include: {
-            event: { select: { organizerId: true } },
+            event: { select: { organizerId: true, eventType: true } },
             buyer: { select: { id: true } },
           }
         },
@@ -273,16 +273,21 @@ export async function commitPayment(req: Request, res: Response) {
     }
 
     const isApproved = !!commit && commit.response_code === 0;
-    const isOwnEvent =
+    
+    // Verificar si el comprador es el organizador (caso prohibido)
+    const buyerIsOrganizer =
       !!payment.reservation &&
       payment.reservation.event?.organizerId === payment.reservation.buyerId;
+    
+    // Verificar si es un evento de reventa (RESALE)
+    const isResaleEvent = payment.reservation?.event?.eventType === 'RESALE';
 
-    console.log('🔵 [COMMIT] isApproved:', isApproved, 'isOwnEvent:', isOwnEvent);
+    console.log('🔵 [COMMIT] isApproved:', isApproved, 'buyerIsOrganizer:', buyerIsOrganizer, 'isResaleEvent:', isResaleEvent);
     console.log('🔵 [COMMIT] response_code:', commit.response_code);
 
-    // Detectar cuenta conectada del organizador para enrutar payout
+    // Detectar cuenta conectada del organizador para enrutar payout (solo RESALE)
     let destAccountId: number | null = null;
-    if (isApproved && !isOwnEvent && payment.reservation?.event?.organizerId) {
+    if (isApproved && isResaleEvent && !buyerIsOrganizer && payment.reservation?.event?.organizerId) {
       const acct = await prisma.connectedAccount.findUnique({
         where: { userId: payment.reservation.event.organizerId },
       });
@@ -301,8 +306,8 @@ export async function commitPayment(req: Request, res: Response) {
       await txp.payment.update({
         where: { id: payment.id },
         data: {
-          // Captura inmediata: COMMITTED (no AUTHORIZED)
-          status: isApproved && !isOwnEvent ? 'COMMITTED' : 'FAILED',
+          // Captura inmediata: COMMITTED si aprobado y no es el organizador comprando su propio evento
+          status: isApproved && !buyerIsOrganizer ? 'COMMITTED' : 'FAILED',
           authorizationCode: (commit as any)?.authorization_code || null,
           paymentTypeCode: (commit as any)?.payment_type_code || null,
           installmentsNumber: (commit as any)?.installments_number ?? null,
@@ -327,12 +332,12 @@ export async function commitPayment(req: Request, res: Response) {
         
         await txp.reservation.updateMany({
           where: { purchaseGroupId },
-          data: isApproved && !isOwnEvent
+          data: isApproved && !buyerIsOrganizer
             ? {
                 status: 'PAID',
                 paidAt: now(),
-                fulfillmentStatus: 'TICKET_APPROVED',
-                approvedAt: now(),
+                fulfillmentStatus: isResaleEvent ? 'TICKET_APPROVED' : 'WAITING_TICKET',
+                approvedAt: isResaleEvent ? now() : null,
               }
             : { status: 'CANCELED' },
         });
@@ -340,19 +345,19 @@ export async function commitPayment(req: Request, res: Response) {
         // Reserva individual sin grupo
         await txp.reservation.update({
           where: { id: payment.reservationId },
-          data: isApproved && !isOwnEvent
+          data: isApproved && !buyerIsOrganizer
             ? {
                 status: 'PAID',
                 paidAt: now(),
-                fulfillmentStatus: 'TICKET_APPROVED',
-                approvedAt: now(),
+                fulfillmentStatus: isResaleEvent ? 'TICKET_APPROVED' : 'WAITING_TICKET',
+                approvedAt: isResaleEvent ? now() : null,
               }
             : { status: 'CANCELED' },
         });
       }
 
-      // Crear Payout PENDING si hay cuenta conectada
-      if (isApproved && !isOwnEvent && finalDestAccountId && payment.reservationId) {
+      // Crear Payout PENDING si hay cuenta conectada (solo RESALE)
+      if (isApproved && isResaleEvent && !buyerIsOrganizer && finalDestAccountId && payment.reservationId) {
         await createPayout({
           accountId: finalDestAccountId,
           reservationId: payment.reservationId,
@@ -366,7 +371,7 @@ export async function commitPayment(req: Request, res: Response) {
     console.log('✅ [COMMIT] Transacción actualizada en BD');
     
     // LOG: Payment success
-    if (isApproved && !isOwnEvent && payment.reservationId) {
+    if (isApproved && !buyerIsOrganizer && payment.reservationId) {
       logPayment.success(payment.reservationId, payment.id, payment.amount);
     } else if (!isApproved) {
       logPayment.failed(payment.reservationId || 0, payment.id, 'Payment not approved by PSP');
@@ -374,7 +379,7 @@ export async function commitPayment(req: Request, res: Response) {
 
     // Procesar reserva(s): generar PDFs (OWN) o marcar vendido (RESALE)
     // Si hay grupo de compra, procesar TODAS las reservas del grupo
-    if (isApproved && !isOwnEvent && payment.reservationId) {
+    if (isApproved && !buyerIsOrganizer && payment.reservationId) {
       if (payment.reservation?.purchaseGroupId) {
         const purchaseGroupId = payment.reservation.purchaseGroupId;
         console.log('🔵 [COMMIT] Procesando grupo de compra:', purchaseGroupId);
@@ -400,14 +405,14 @@ export async function commitPayment(req: Request, res: Response) {
     }
 
     const payload: any = {
-      ok: isApproved && !isOwnEvent,
+      ok: isApproved && !buyerIsOrganizer,
       token,
       buyOrder: payment.buyOrder,
       amount: payment.amount,
       authorizationCode: (commit as any)?.authorization_code,
       responseCode: (commit as any)?.response_code,
       reservationId: payment.reservationId,
-      note: isApproved && !isOwnEvent 
+      note: isApproved && !buyerIsOrganizer 
         ? 'Pago confirmado. Tu entrada está lista para descargar.' 
         : 'Pago procesado.',
     };
@@ -439,7 +444,7 @@ export async function commitPayment(req: Request, res: Response) {
       // Fallback: ruta legacy payment-result (solo para errores)
       let baseUrl = env.WEBPAY_FINAL_URL.replace(/\/payment-result\/?$/, '').replace(/\/eventos\/?$/, '');
       const u = new URL(`${baseUrl}/payment-result`);
-      u.searchParams.set('status', payload.ok ? 'success' : (isOwnEvent ? 'own-event-forbidden' : 'failed'));
+      u.searchParams.set('status', payload.ok ? 'success' : (buyerIsOrganizer ? 'own-event-forbidden' : 'failed'));
       u.searchParams.set('token', token);
       u.searchParams.set('buyOrder', payment.buyOrder || '');
       u.searchParams.set('amount', String(payment.amount));
@@ -449,7 +454,7 @@ export async function commitPayment(req: Request, res: Response) {
     }
 
     console.log('⚠️ [COMMIT] No hay WEBPAY_FINAL_URL, devolviendo JSON');
-    return res.status(payload.ok ? 200 : (isOwnEvent ? 403 : 200)).json(payload);
+    return res.status(payload.ok ? 200 : (buyerIsOrganizer ? 403 : 200)).json(payload);
   } catch (err: any) {
     console.error('commitPayment error:', err);
     return res.status(500).json({ error: err?.message || 'Error al confirmar el pago' });
