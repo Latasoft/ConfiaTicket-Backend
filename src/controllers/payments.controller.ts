@@ -319,8 +319,25 @@ export async function commitPayment(req: Request, res: Response) {
         },
       });
 
-      // Marcar Reservation como PAID inmediatamente
-      if (payment.reservationId) {
+      // Marcar Reservation(s) como PAID inmediatamente
+      // Si hay purchaseGroupId, actualizar TODAS las reservas del grupo
+      if (payment.reservationId && payment.reservation?.purchaseGroupId) {
+        const purchaseGroupId = payment.reservation.purchaseGroupId;
+        console.log('🔵 [COMMIT] Actualizando TODAS las reservas del grupo:', purchaseGroupId);
+        
+        await txp.reservation.updateMany({
+          where: { purchaseGroupId },
+          data: isApproved && !isOwnEvent
+            ? {
+                status: 'PAID',
+                paidAt: now(),
+                fulfillmentStatus: 'TICKET_APPROVED',
+                approvedAt: now(),
+              }
+            : { status: 'CANCELED' },
+        });
+      } else if (payment.reservationId) {
+        // Reserva individual sin grupo
         await txp.reservation.update({
           where: { id: payment.reservationId },
           data: isApproved && !isOwnEvent
@@ -355,12 +372,31 @@ export async function commitPayment(req: Request, res: Response) {
       logPayment.failed(payment.reservationId || 0, payment.id, 'Payment not approved by PSP');
     }
 
-    // Procesar reserva: generar PDFs (OWN) o marcar vendido (RESALE)
+    // Procesar reserva(s): generar PDFs (OWN) o marcar vendido (RESALE)
+    // Si hay grupo de compra, procesar TODAS las reservas del grupo
     if (isApproved && !isOwnEvent && payment.reservationId) {
-      console.log('🔵 [COMMIT] Iniciando procesamiento asíncrono de reserva:', payment.reservationId);
-      
-      // Sistema de cola con retry automático
-      queueTicketGeneration(payment.reservationId);
+      if (payment.reservation?.purchaseGroupId) {
+        const purchaseGroupId = payment.reservation.purchaseGroupId;
+        console.log('🔵 [COMMIT] Procesando grupo de compra:', purchaseGroupId);
+        
+        // Obtener todas las reservas del grupo
+        const groupReservations = await prisma.reservation.findMany({
+          where: { purchaseGroupId },
+          select: { id: true },
+        });
+        
+        console.log('🔵 [COMMIT] Reservas en el grupo:', groupReservations.length);
+        
+        // Generar tickets para cada reserva del grupo
+        for (const res of groupReservations) {
+          console.log('🔵 [COMMIT] Generando tickets para reserva:', res.id);
+          queueTicketGeneration(res.id);
+        }
+      } else {
+        // Reserva individual sin grupo
+        console.log('🔵 [COMMIT] Iniciando procesamiento asíncrono de reserva individual:', payment.reservationId);
+        queueTicketGeneration(payment.reservationId);
+      }
     }
 
     const payload: any = {
