@@ -571,6 +571,60 @@ export async function deleteMyEvent(req: Request, res: Response) {
   res.status(204).send();
 }
 
+/**
+ * PATCH /api/organizer/events/:id/toggle-active
+ * Activar o desactivar un evento (incluso con ventas)
+ */
+export async function toggleEventActive(req: Request, res: Response) {
+  const user = (req as any).user as Authed;
+  const id = Number(req.params.id);
+  const { isActive } = req.body;
+
+  // Validar parámetros
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ error: 'ID de evento inválido' });
+  }
+
+  if (typeof isActive !== 'boolean') {
+    return res.status(400).json({ error: 'El campo isActive debe ser boolean' });
+  }
+
+  try {
+    // Verificar que el evento existe y pertenece al organizador
+    const event = await prisma.event.findFirst({
+      where: { id, organizerId: user.id },
+      include: {
+        _count: {
+          select: {
+            reservations: { where: { status: 'PAID' } },
+          },
+        },
+      },
+    });
+
+    if (!event) {
+      return res.status(404).json({ error: 'Evento no encontrado' });
+    }
+
+    // Actualizar estado del evento
+    const updated = await prisma.event.update({
+      where: { id },
+      data: { isActive },
+    });
+
+    return res.json({
+      success: true,
+      message: isActive ? 'Evento activado correctamente' : 'Evento desactivado correctamente',
+      event: mapEvent(updated),
+      paidReservations: event._count.reservations,
+    });
+  } catch (error) {
+    console.error('toggleEventActive error:', error);
+    return res.status(500).json({ error: 'Error al actualizar el evento' });
+  }
+}
+
+
 
 
 

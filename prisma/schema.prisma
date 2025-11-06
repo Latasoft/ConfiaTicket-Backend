@@ -79,6 +79,7 @@ model Event {
   approved      Boolean   @default(false)
   coverImageUrl String?   @db.VarChar(1024)
   eventType     EventType @default(OWN)
+  isActive      Boolean   @default(true)
 
   organizer     User      @relation("OrganizerEvents", fields: [organizerId], references: [id])
   organizerId   Int
@@ -105,6 +106,7 @@ model Event {
   @@index([approved])
   @@index([date])
   @@index([eventType])
+  @@index([isActive])
 }
 
 /* ===================== TICKETS (Solo RESALE) ===================== */

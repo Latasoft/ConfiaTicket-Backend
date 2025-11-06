@@ -196,7 +196,7 @@ export async function listPublicEvents(req: Request, res: Response) {
 
     const now = new Date();
 
-    const whereCommon: any = { approved: true };
+    const whereCommon: any = { approved: true, isActive: true };
     if (q) {
       const contains: any = { contains: q };
       whereCommon.OR = [{ title: contains }, { description: contains }, { location: contains }];
@@ -478,6 +478,7 @@ export async function getEventDetails(req: Request, res: Response) {
         coverImageUrl: true,
         organizerId: true,
         eventType: true,
+        isActive: true,
         organizer: { select: { id: true, name: true, email: true } },
       },
     });
@@ -530,7 +531,7 @@ export async function getEventDetails(req: Request, res: Response) {
     const remaining = Math.max(0, totalCapacity - (paid + pendingActive));
 
     const hasStarted = now >= startsAt;
-    const canBuy = event.approved && !hasStarted && !salesClosed && remaining > 0;
+    const canBuy = event.approved && event.isActive && !hasStarted && !salesClosed && remaining > 0;
 
     return res.json({
       ...event,
@@ -571,9 +572,13 @@ export async function purchaseTickets(req: Request, res: Response) {
     const txResult = await prisma.$transaction(async (tx) => {
       const ev = await tx.event.findUnique({
         where: { id: eventId },
-        select: { id: true, capacity: true, price: true, organizerId: true, approved: true, date: true },
+        select: { id: true, capacity: true, price: true, organizerId: true, approved: true, date: true, isActive: true },
       });
       if (!ev) return { status: 404, payload: { error: 'Evento no encontrado' } };
+
+      if (!ev.isActive) {
+        return { status: 403, payload: { error: 'Este evento ha sido desactivado por el organizador' } };
+      }
 
       const now = new Date();
       const startsAt = ev.date instanceof Date ? ev.date : new Date(ev.date);

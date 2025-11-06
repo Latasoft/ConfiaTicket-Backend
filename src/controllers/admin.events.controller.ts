@@ -45,6 +45,7 @@ function mapEvent(ev: any) {
     venue: ev.location,
     capacity: ev.capacity,
     status: ev.approved ? ('approved' as AdminStatus) : ('pending' as AdminStatus),
+    isActive: ev.isActive ?? true,
     eventType: ev.eventType,
     organizerId: ev.organizerId,
     organizer: ev.organizer
@@ -333,5 +334,52 @@ export async function adminDeleteEvent(req: Request, res: Response) {
     res.status(500).json({ error: 'SERVER_ERROR' });
   }
 }
+
+/**
+ * PATCH /admin/events/:id/toggle-active
+ * Activar o desactivar un evento como admin (incluso con ventas)
+ */
+export async function adminToggleEventActive(req: Request, res: Response) {
+  try {
+    const id = toInt(req.params.id, 0);
+    if (!id) return res.status(422).json({ error: 'ID inválido' });
+
+    const { isActive } = req.body;
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({ error: 'El campo isActive debe ser boolean' });
+    }
+
+    // Verificar que el evento existe
+    const event = await prisma.event.findUnique({
+      where: { id },
+      include: {
+        _count: {
+          select: {
+            reservations: { where: { status: 'PAID' } },
+          },
+        },
+      },
+    });
+
+    if (!event) return res.status(404).json({ error: 'Evento no encontrado' });
+
+    // Actualizar estado del evento
+    const updated = await prisma.event.update({
+      where: { id },
+      data: { isActive },
+    });
+
+    res.json({
+      success: true,
+      message: isActive ? 'Evento activado correctamente' : 'Evento desactivado correctamente',
+      event: mapEvent(updated),
+      paidReservations: event._count.reservations,
+    });
+  } catch (err: any) {
+    console.error('adminToggleEventActive error:', err);
+    res.status(500).json({ error: 'SERVER_ERROR' });
+  }
+}
+
 
 

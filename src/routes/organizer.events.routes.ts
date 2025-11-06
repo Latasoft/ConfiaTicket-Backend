@@ -6,6 +6,7 @@ import {
   getMyEvent,
   updateMyEvent,
   deleteMyEvent,
+  toggleEventActive,
 } from '../controllers/organizer.events.controller';
 import { authenticateToken, requireVerifiedOrganizer } from '../middleware/authMiddleware';
 
@@ -18,6 +19,7 @@ router.get('/', listMyEvents);
 router.post('/', createMyEvent);
 router.get('/:id', getMyEvent);
 router.put('/:id', updateMyEvent);
+router.patch('/:id/toggle-active', toggleEventActive);
 router.delete('/:id', deleteMyEvent);
 
 export default router;
