@@ -17,6 +17,11 @@ import {
   listReservationTickets,
   downloadIndividualTicket,
   getGroupReservationTickets,
+  // New endpoints (replace LEGACY tickets.controller)
+  listMyTickets,
+  getBookingStatus,
+  refreshBookingPayment,
+  refreshBookingTicket,
 } from "../controllers/bookings.controller";
 
 const router = Router();
@@ -64,6 +69,22 @@ router.get("/:id/tickets/:ticketId/download", authenticateToken, downloadIndivid
 
 /** Descargar ticket PDF (LEGACY - mantener compatibilidad) */
 router.get("/:id/ticket", authenticateToken, downloadTicket);
+
+/* ============================================================
+ *  NEW ENDPOINTS - Reemplazan tickets.controller.ts LEGACY
+ * ==========================================================*/
+
+/** Listar todos los tickets del usuario (PAID reservations) */
+router.get("/my-tickets", authenticateToken, listMyTickets);
+
+/** Obtener estado de la reserva/ticket */
+router.get("/:id/status", authenticateToken, getBookingStatus);
+
+/** Refrescar estado del pago consultando PSP */
+router.post("/:id/refresh-payment", authenticateToken, refreshBookingPayment);
+
+/** Refrescar estado de generación del ticket */
+router.post("/:id/refresh-ticket", authenticateToken, refreshBookingTicket);
 
 export default router;
 

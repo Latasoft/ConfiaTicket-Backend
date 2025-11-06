@@ -11,7 +11,7 @@ import {
 import {
   organizerUploadTicket,
   organizerListReservations,
-} from "../controllers/tickets.controller";
+} from "../controllers/admin.tickets.controller";
 import {
   createTicket,
   listTickets,

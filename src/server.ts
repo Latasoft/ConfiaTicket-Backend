@@ -29,13 +29,14 @@ import paymentsRoutes from './routes/payments.routes';
 import organizerResaleTicketsRoutes from './routes/organizer.resaleTickets.routes';
 import organizerOwnEventSectionsRoutes from './routes/organizer.ownEventSections.routes';
 import adminTicketsRoutes from './routes/admin.tickets.routes';
-import ticketsRoutes from './routes/tickets.routes';
+// ❌ LEGACY REMOVED: import ticketsRoutes from './routes/tickets.routes';
 
 import pspRoutes from './routes/psp.routes';
 
 import kushkiAdapter from './routes/payouts.adapter.kushki.routes';
 
 import adminPayoutsRoutes from './routes/admin.payouts.routes';
+import adminPurchasesRoutes from './routes/admin.purchases.routes';
 
 import configRoutes from './routes/config.routes';
 import adminConfigRoutes from './routes/admin.config.routes';
@@ -251,12 +252,15 @@ app.use('/adapter/kushki', kushkiAdapter);
 app.use('/api/organizer', organizerResaleTicketsRoutes);
 // evento propio
 app.use('/api/organizer', organizerOwnEventSectionsRoutes);
-// admin y comprador
+// admin 
 app.use('/api/admin', adminTicketsRoutes);
-app.use('/api/tickets', ticketsRoutes);
+// ❌ LEGACY REMOVED: app.use('/api/tickets', ticketsRoutes); - Now handled by /api/bookings
 
-// ⭐ Admin payouts (retry/reconcile manual)
+// Admin payouts (retry/reconcile manual)
 app.use('/api/admin/payouts', adminPayoutsRoutes);
+
+// Admin purchases (panel de compras)
+app.use('/api/admin/purchases', adminPurchasesRoutes);
 
 /* ======================= Manejo de errores ======================= */
 

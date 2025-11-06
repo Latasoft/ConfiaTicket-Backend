@@ -4,9 +4,9 @@ import {
   adminApproveTicket,
   adminListPendingTickets,
   adminRejectTicket,
-  adminPreviewTicketFile,   // <- preview/descarga de archivo
-  sweepOverdueReservations, // <- barrido de reservas vencidas + reembolso
-} from "../controllers/tickets.controller";
+  adminPreviewTicketFile,
+  sweepOverdueReservations,
+} from "../controllers/admin.tickets.controller";
 import { authenticateToken, requireSuperadmin } from "../middleware/authMiddleware";
 
 // NUEVO: importamos el controlador todo-en-uno desde payments.controller
