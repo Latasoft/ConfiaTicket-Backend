@@ -78,6 +78,14 @@ export async function holdReservation(req: Authed, res: Response) {
         validateEventAvailable(stockInfo);
         validateNotOwnEvent(ev.organizerId, userId);
 
+        // ✅ Validar que el evento esté activo
+        if (!ev.isActive) {
+          const e = new Error("EVENT_DISABLED") as any;
+          e.status = 403;
+          e.message = "Este evento ha sido desactivado por el organizador";
+          throw e;
+        }
+
         // Validar cantidad total según el tipo de evento
         const totalQuantity = sectionsToReserve.reduce((sum, s) => sum + s.quantity, 0);
         
@@ -1009,9 +1017,14 @@ export async function downloadIndividualTicket(req: Authed, res: Response) {
  */
 export async function listMyTickets(req: Authed, res: Response) {
   try {
+    console.log('🔍 [DEBUG] listMyTickets - req.user:', req.user);
     const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ ok: false, error: "UNAUTHENTICATED" });
+    if (!userId) {
+      console.error('❌ [DEBUG] listMyTickets - NO USER ID');
+      return res.status(401).json({ ok: false, error: "UNAUTHENTICATED" });
+    }
 
+    console.log('✅ [DEBUG] listMyTickets - userId:', userId);
     const q = String(req.query?.q ?? "").trim();
     const page = Math.max(1, parseInt(String(req.query?.page ?? "1"), 10) || 1);
     const pageSize = Math.min(50, Math.max(1, parseInt(String(req.query?.pageSize ?? "10"), 10) || 10));

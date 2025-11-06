@@ -43,7 +43,15 @@ router.get("/my", authenticateToken, listMyBookings);
 /** Obtener todas las reservaciones de un grupo de compra */
 router.get("/group/:purchaseGroupId/tickets", authenticateToken, getGroupReservationTickets);
 
-/** Obtener una reserva específica */
+/* ============================================================
+ *  NEW ENDPOINTS - Reemplazan tickets.controller.ts LEGACY
+ *  IMPORTANTE: Deben ir ANTES de /:id para no ser capturados
+ * ==========================================================*/
+
+/** Listar todos los tickets del usuario (PAID reservations) */
+router.get("/my-tickets", authenticateToken, listMyTickets);
+
+/** Obtener una reserva específica (debe ir DESPUÉS de rutas específicas) */
 router.get("/:id", authenticateToken, getBooking);
 
 /** Reservas del organizador (sus eventos) o superadmin */
@@ -72,10 +80,8 @@ router.get("/:id/ticket", authenticateToken, downloadTicket);
 
 /* ============================================================
  *  NEW ENDPOINTS - Reemplazan tickets.controller.ts LEGACY
+ *  NOTA: /my-tickets movido arriba para evitar conflicto con /:id
  * ==========================================================*/
-
-/** Listar todos los tickets del usuario (PAID reservations) */
-router.get("/my-tickets", authenticateToken, listMyTickets);
 
 /** Obtener estado de la reserva/ticket */
 router.get("/:id/status", authenticateToken, getBookingStatus);
