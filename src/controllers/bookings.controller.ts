@@ -2,61 +2,17 @@
 import { Request, Response } from "express";
 import prisma from "../prisma/client";
 import { Prisma } from "@prisma/client";
-import { processReservationAfterPayment } from "../services/reservation.service";
+import { queueTicketGeneration } from "../services/ticketGeneration.service";
+import { getRemainingStock, validateEventAvailable, validateNotOwnEvent, validateStockAvailability } from "../services/stock.service";
 import { getTicketLimits, getPlatformFeeBps, getReservationHoldMinutes } from "../services/config.service";
 import crypto from "crypto";
 
 type Authed = Request & { user?: { id: number; role: string; verifiedOrganizer?: boolean } };
 
-// DEPRECADO: Usar getReservationHoldMinutes() en su lugar
-const HOLD_MINUTES = 10;
-
 /* ===================== Helpers ===================== */
 function parseIntSafe(v: unknown, def = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? Math.floor(n) : def;
-}
-
-/** Stock restante considerando PAID + PENDING_PAYMENT no vencidos */
-async function remainingForEvent(
-  tx: Prisma.TransactionClient | typeof prisma,
-  eventId: number
-) {
-  const ev = await tx.event.findUnique({
-    where: { id: eventId },
-    select: {
-      id: true,
-      capacity: true,
-      price: true,
-      organizerId: true,
-      date: true,
-      approved: true,
-      eventType: true,
-    },
-  });
-  if (!ev) {
-    const e = new Error("EVENT_NOT_FOUND") as any;
-    e.status = 404;
-    throw e;
-  }
-
-  const now = new Date();
-  const agg = await tx.reservation.aggregate({
-    _sum: { quantity: true },
-    where: {
-      eventId,
-      OR: [
-        { status: "PAID" as any },
-        { status: "PENDING_PAYMENT" as any, expiresAt: { gt: now } },
-      ],
-    },
-  });
-  const used = agg._sum.quantity ?? 0;
-  const remaining = Math.max(0, ev.capacity - used);
-  const startsAt = ev.date instanceof Date ? ev.date : new Date(ev.date);
-  const hasStarted = now >= startsAt;
-
-  return { ev, remaining, hasStarted };
 }
 
 /* ===================== HOLD ===================== */
@@ -114,26 +70,34 @@ export async function holdReservation(req: Authed, res: Response) {
 
     const result = await prisma.$transaction(
       async (tx) => {
-        const { ev, remaining, hasStarted } = await remainingForEvent(tx, eventId);
+        // Usar servicio de stock centralizado
+        const stockInfo = await getRemainingStock(eventId, tx);
+        const { event: ev, remaining, hasStarted } = stockInfo;
 
-        if (hasStarted) {
-          const e = new Error("EVENT_HAS_STARTED") as any;
-          e.status = 400;
-          throw e;
-        }
-        if (!ev.approved) {
-          const e = new Error("EVENT_NOT_APPROVED") as any;
-          e.status = 400;
-          throw e;
-        }
-        if (ev.organizerId === userId) {
-          const e = new Error("CANNOT_BUY_OWN_EVENT") as any;
-          e.status = 403;
-          throw e;
-        }
+        // Validaciones usando helpers del servicio
+        validateEventAvailable(stockInfo);
+        validateNotOwnEvent(ev.organizerId, userId);
 
         // Validar cantidad total según el tipo de evento
         const totalQuantity = sectionsToReserve.reduce((sum, s) => sum + s.quantity, 0);
+        
+        // ⭐ VALIDACIÓN CRÍTICA: Para eventos RESALE, ticketId es OBLIGATORIO
+        if (ev.eventType === 'RESALE') {
+          if (!ticketId) {
+            const e = new Error("TICKET_ID_REQUIRED_FOR_RESALE") as any;
+            e.status = 422;
+            e.message = "Para eventos de reventa debes especificar el ID del ticket físico a comprar";
+            throw e;
+          }
+          
+          // RESALE solo permite comprar 1 ticket a la vez
+          if (totalQuantity !== 1) {
+            const e = new Error("RESALE_ONLY_ALLOWS_ONE_TICKET") as any;
+            e.status = 422;
+            e.message = "Solo puedes comprar un ticket de reventa a la vez";
+            throw e;
+          }
+        }
         
         // Obtener límites de la configuración
         const ticketLimits = await getTicketLimits();
@@ -467,17 +431,10 @@ export async function payTestReservation(req: Authed, res: Response) {
       };
     });
 
-    // Procesar TODAS las reservas en paralelo de forma asíncrona (fire-and-forget)
-    // Esto permite responder inmediatamente al cliente mientras los PDFs se generan en background
+    // Procesar TODAS las reservas en paralelo de forma asíncrona
+    // Sistema de cola con retry automático
     result.reservations.forEach(reservation => {
-      processReservationAfterPayment(reservation.id)
-        .then(() => {
-          console.log(`✅ [TEST_PAY] Reserva ${reservation.id} procesada exitosamente (async)`);
-        })
-        .catch((pdfError) => {
-          console.error(`❌ [TEST_PAY] Error procesando reserva ${reservation.id} (async):`, pdfError);
-          // No afecta la respuesta, el pago ya se confirmó
-        });
+      queueTicketGeneration(reservation.id);
     });
 
     return res.json({ 
@@ -523,24 +480,13 @@ export async function createBooking(req: Authed, res: Response) {
     }
 
     const created = await prisma.$transaction(async (tx) => {
-      const { ev, remaining, hasStarted } = await remainingForEvent(tx, eventId);
+      // Usar servicio de stock
+      const stockInfo = await getRemainingStock(eventId, tx);
+      const { event: ev, remaining } = stockInfo;
 
-      if (hasStarted) {
-        const e = new Error("EVENT_HAS_STARTED") as any;
-        e.status = 400;
-        throw e;
-      }
-      if (!ev.approved) {
-        const e = new Error("EVENT_NOT_APPROVED") as any;
-        e.status = 400;
-        throw e;
-      }
-      // 🚫 organizador no puede comprar su propio evento
-      if (ev.organizerId === userId) {
-        const e = new Error("CANNOT_BUY_OWN_EVENT") as any;
-        e.status = 403;
-        throw e;
-      }
+      // Validaciones
+      validateEventAvailable(stockInfo);
+      validateNotOwnEvent(ev.organizerId, userId);
 
       if (quantity > remaining) {
         const e = new Error("NO_CAPACITY") as any;
@@ -783,15 +729,36 @@ export async function downloadTicket(req: Authed, res: Response) {
       return res.status(400).json({ error: "BOOKING_NOT_PAID" });
     }
 
-    // Verificar que existe PDF generado (ahora tanto OWN como RESALE tienen PDFs)
-    if (!reservation.generatedPdfPath) {
+    // Buscar tickets generados (nuevo sistema - tanto OWN como RESALE)
+    const generatedTickets = await prisma.generatedTicket.findMany({
+      where: { reservationId: id },
+      orderBy: { ticketNumber: 'asc' },
+    });
+
+    if (!generatedTickets.length) {
+      // Fallback: intentar con sistema LEGACY (para reservas antiguas)
+      if (reservation.generatedPdfPath) {
+        const fs = require('fs');
+        const path = require('path');
+        const pdfPath = path.resolve(reservation.generatedPdfPath);
+
+        if (fs.existsSync(pdfPath)) {
+          res.setHeader('Content-Type', 'application/pdf');
+          res.setHeader('Content-Disposition', `attachment; filename="ticket-${reservation.code}.pdf"`);
+          const fileStream = fs.createReadStream(pdfPath);
+          return fileStream.pipe(res);
+        }
+      }
       return res.status(404).json({ error: "PDF_NOT_GENERATED_YET" });
     }
 
-    // Enviar el archivo PDF
+    // Usar el primer PDF generado (para reservas con múltiples tickets OWN)
+    // O el único PDF (para RESALE que siempre es quantity=1)
     const fs = require('fs');
     const path = require('path');
-    const pdfPath = path.resolve(reservation.generatedPdfPath);
+    
+    // TypeScript safety: ya validamos que length > 0 arriba
+    const pdfPath = path.resolve(generatedTickets[0]!.pdfPath);
 
     if (!fs.existsSync(pdfPath)) {
       return res.status(404).json({ error: "PDF_FILE_NOT_FOUND" });
@@ -1031,6 +998,300 @@ export async function downloadIndividualTicket(req: Authed, res: Response) {
   }
 }
 
+/* ============================================================
+ *  NEW: Additional endpoints for frontend compatibility
+ *  These replace LEGACY tickets.controller.ts endpoints
+ * ==========================================================*/
+
+/**
+ * GET /api/bookings/my-tickets
+ * Lista todos los tickets del usuario (PAID reservations con tickets generados)
+ */
+export async function listMyTickets(req: Authed, res: Response) {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ ok: false, error: "UNAUTHENTICATED" });
+
+    const q = String(req.query?.q ?? "").trim();
+    const page = Math.max(1, parseInt(String(req.query?.page ?? "1"), 10) || 1);
+    const pageSize = Math.min(50, Math.max(1, parseInt(String(req.query?.pageSize ?? "10"), 10) || 10));
+    const skip = (page - 1) * pageSize;
+
+    const where: any = {
+      buyerId: userId,
+      status: "PAID",
+      ...(q ? { event: { title: { contains: q, mode: "insensitive" } } } : {}),
+    };
+
+    const [total, rows] = await Promise.all([
+      prisma.reservation.count({ where }),
+      prisma.reservation.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        skip,
+        take: pageSize,
+        select: {
+          id: true,
+          eventId: true,
+          amount: true,
+          quantity: true,
+          code: true,
+          status: true,
+          paidAt: true,
+          createdAt: true,
+          expiresAt: true,
+          // OWN event fields
+          generatedPdfPath: true,
+          qrCode: true,
+          seatAssignment: true,
+          scanned: true,
+          scannedAt: true,
+          // RESALE ticket relation
+          ticket: {
+            select: {
+              id: true,
+              ticketCode: true,
+              row: true,
+              seat: true,
+              zone: true,
+              level: true,
+              imageFileName: true,
+              imageMime: true,
+              sold: true,
+              soldAt: true,
+            },
+          },
+          event: {
+            select: {
+              id: true,
+              title: true,
+              date: true,
+              eventType: true,
+              location: true,
+              coverImageUrl: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    const items = rows.map((r: any) => {
+      const isOwn = r.event?.eventType === "OWN";
+      const hasTicket = isOwn ? !!r.generatedPdfPath : !!r.ticket;
+      
+      return {
+        reservationId: r.id,
+        id: r.id,
+        eventId: r.eventId,
+        code: r.code,
+        status: r.status,
+        paidAt: r.paidAt,
+        expiresAt: r.expiresAt,
+        createdAt: r.createdAt,
+        event: r.event,
+        quantity: r.quantity,
+        amount: r.amount,
+        // OWN fields
+        generatedPdfPath: r.generatedPdfPath,
+        qrCode: r.qrCode,
+        seatAssignment: r.seatAssignment,
+        scanned: r.scanned,
+        scannedAt: r.scannedAt,
+        // RESALE ticket
+        ticket: r.ticket,
+        // Download URLs
+        canDownload: hasTicket,
+        downloadUrl: `/api/bookings/${r.id}/ticket`,
+        previewUrl: `/api/bookings/${r.id}/ticket`,
+      };
+    });
+
+    return res.status(200).json({ items, total, page, pageSize });
+  } catch (err: any) {
+    console.error("listMyTickets error:", err);
+    return res.status(500).json({ ok: false, error: err?.message || "SERVER_ERROR" });
+  }
+}
+
+/**
+ * GET /api/bookings/:id/status
+ * Devuelve el estado simplificado de la reserva (reemplaza getTicketFlowStatus LEGACY)
+ */
+export async function getBookingStatus(req: Authed, res: Response) {
+  try {
+    const reservationId = Number(req.params.id);
+    const userId = req.user?.id;
+    
+    if (!userId) return res.status(401).json({ ok: false, error: "UNAUTHENTICATED" });
+    
+    const r = await prisma.reservation.findUnique({
+      where: { id: reservationId },
+      select: {
+        id: true,
+        buyerId: true,
+        status: true,
+        paidAt: true,
+        expiresAt: true,
+        generatedPdfPath: true,
+        ticket: { select: { id: true } },
+      },
+    });
+    
+    if (!r) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+    
+    // Solo el dueño o superadmin
+    if (r.buyerId !== userId && req.user?.role !== "superadmin") {
+      return res.status(403).json({ ok: false, error: "FORBIDDEN" });
+    }
+
+    const hasTicket = !!r.generatedPdfPath || !!r.ticket;
+    
+    return res.json({
+      ok: true,
+      id: r.id,
+      status: r.status,
+      paidAt: r.paidAt,
+      expiresAt: r.expiresAt,
+      hasTicket,
+      ticketReady: r.status === "PAID" && hasTicket,
+    });
+  } catch (err: any) {
+    console.error("getBookingStatus error:", err);
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR" });
+  }
+}
+
+/**
+ * POST /api/bookings/:id/refresh-payment
+ * Consulta el estado del pago en Webpay y actualiza
+ */
+export async function refreshBookingPayment(req: Authed, res: Response) {
+  try {
+    const reservationId = Number(req.params.id);
+    const userId = req.user?.id;
+    
+    if (!userId) return res.status(401).json({ ok: false, error: "UNAUTHENTICATED" });
+    
+    const r = await prisma.reservation.findUnique({
+      where: { id: reservationId },
+      include: { payment: true, event: true },
+    });
+    
+    if (!r) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+    
+    // Solo el dueño o superadmin
+    if (r.buyerId !== userId && req.user?.role !== "superadmin") {
+      return res.status(403).json({ ok: false, error: "FORBIDDEN" });
+    }
+
+    const p = r.payment;
+    if (p?.token) {
+      try {
+        const { getWebpayStatus } = await import("../services/payment.service");
+        const st: any = await getWebpayStatus(p.token);
+        
+        const mapStatus = (s?: string | null) => {
+          const u = String(s || "").toUpperCase();
+          if (u === "AUTHORIZED") return "AUTHORIZED";
+          if (u === "FAILED") return "FAILED";
+          if (u === "REVERSED" || u === "NULLIFIED") return "VOIDED";
+          if (u === "COMMITTED" || u === "PAYMENT_COMMITTED") return "COMMITTED";
+          return null;
+        };
+        
+        const mapped = mapStatus(st?.status);
+        const data: any = {
+          responseCode: typeof st?.response_code === "number" ? st.response_code : p.responseCode,
+          authorizationCode: st?.authorization_code || p.authorizationCode || null,
+          paymentTypeCode: st?.payment_type_code || p.paymentTypeCode || null,
+        };
+
+        if (mapped === "AUTHORIZED") {
+          data.status = "AUTHORIZED";
+          data.authorizedAmount = typeof st?.amount === "number" ? Math.round(st.amount) : (p.authorizedAmount ?? p.amount);
+        } else if (mapped === "COMMITTED") {
+          data.status = "COMMITTED";
+        } else if (mapped === "VOIDED") {
+          data.status = "VOIDED";
+          data.voidedAt = new Date();
+        } else if (mapped === "FAILED") {
+          data.status = "FAILED";
+        }
+
+        await prisma.payment.update({ where: { id: p.id }, data });
+      } catch (e) {
+        console.warn("refreshBookingPayment status error:", e);
+      }
+    }
+
+    // Devolver estado actualizado
+    const fresh = await prisma.reservation.findUnique({
+      where: { id: reservationId },
+      include: {
+        event: { select: { id: true, title: true, date: true, location: true, coverImageUrl: true } },
+        payment: { select: { id: true, status: true, amount: true, updatedAt: true } },
+      },
+    });
+    
+    if (!fresh) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+    
+    return res.json({
+      ok: true,
+      reservation: fresh,
+    });
+  } catch (err: any) {
+    console.error("refreshBookingPayment error:", err);
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR" });
+  }
+}
+
+/**
+ * POST /api/bookings/:id/refresh-ticket
+ * Refresca el estado de generación del ticket (principalmente para polling)
+ */
+export async function refreshBookingTicket(req: Authed, res: Response) {
+  try {
+    const reservationId = Number(req.params.id);
+    const userId = req.user?.id;
+    
+    if (!userId) return res.status(401).json({ ok: false, error: "UNAUTHENTICATED" });
+    
+    const r = await prisma.reservation.findUnique({
+      where: { id: reservationId },
+      select: {
+        id: true,
+        buyerId: true,
+        status: true,
+        generatedPdfPath: true,
+        qrCode: true,
+        ticket: { select: { id: true, ticketCode: true } },
+      },
+    });
+    
+    if (!r) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+    
+    // Solo el dueño o superadmin
+    if (r.buyerId !== userId && req.user?.role !== "superadmin") {
+      return res.status(403).json({ ok: false, error: "FORBIDDEN" });
+    }
+
+    const hasTicket = !!r.generatedPdfPath || !!r.ticket;
+    
+    return res.json({
+      ok: true,
+      id: r.id,
+      status: r.status,
+      hasTicket,
+      ticketReady: r.status === "PAID" && hasTicket,
+      generatedPdfPath: r.generatedPdfPath,
+      qrCode: r.qrCode,
+      ticket: r.ticket,
+    });
+  } catch (err: any) {
+    console.error("refreshBookingTicket error:", err);
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR" });
+  }
+}
 
 
 

@@ -4,6 +4,7 @@ import crypto from "crypto";
 import prisma from "../prisma/client";
 import { env } from "../config/env";
 import { getPayoutProvider } from "../services/payouts/provider";
+import { generateIdempotencyKey } from "../services/payment.service";
 import { request as httpsRequest } from "https";
 import { request as httpRequest } from "http";
 import { URL } from "url";
@@ -30,14 +31,6 @@ type PayoutStatus =
   | "CANCELED";
 
 /* ====================== helpers ====================== */
-
-function newIdempotencyKey(prefix = "payout") {
-  try {
-    return `${prefix}_${crypto.randomUUID()}`;
-  } catch {
-    return `${prefix}_${Date.now()}_${crypto.randomBytes(6).toString("hex")}`;
-  }
-}
 
 function assertAccountReady(acc: {
   payoutsEnabled: boolean;
@@ -146,13 +139,11 @@ router.post("/:id/retry", async (req: Request, res: Response) => {
     }
     // Permitimos reintento incluso si IN_TRANSIT/SCHEDULED (replay idempotente)
 
-    // Asegurar idempotencyKey
-    const idem = payout.idempotencyKey || newIdempotencyKey();
+    // Idempotency key
+    const idem = payout.idempotencyKey || generateIdempotencyKey();
     if (!payout.idempotencyKey) {
       await prisma.payout.update({ where: { id: payout.id }, data: { idempotencyKey: idem } });
-    }
-
-    const provider = getPayoutProvider();
+    }    const provider = getPayoutProvider();
     const resp = await provider.pay({
       payoutId: payout.id,
       amount: payout.amount,

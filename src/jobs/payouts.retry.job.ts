@@ -1,6 +1,7 @@
 // src/jobs/payouts.retry.job.ts
 import prisma from "../prisma/client";
 import { getPayoutProvider } from "../services/payouts/provider";
+import { generateIdempotencyKey } from "../services/payment.service";
 import { env } from "../config/env";
 import crypto from "crypto";
 import { request as httpsRequest } from "https";
@@ -23,14 +24,6 @@ type PayoutStatus =
   | "CANCELED";
 
 /* ================= helpers ================= */
-
-function newIdempotencyKey(prefix = "payout") {
-  try {
-    return `${prefix}_${crypto.randomUUID()}`;
-  } catch {
-    return `${prefix}_${Date.now()}_${crypto.randomBytes(6).toString("hex")}`;
-  }
-}
 
 /** Parseo del schedule desde env: "60,300,1800,10800,86400" (segundos) */
 function parseSchedule(s?: string | null): number[] {
@@ -159,7 +152,7 @@ export async function runPayoutsRetryOnce(limitArg?: number) {
       }
 
       // idempotencyKey obligatorio
-      const idem = p.idempotencyKey?.trim() ? p.idempotencyKey : newIdempotencyKey();
+      const idem = p.idempotencyKey?.trim() ? p.idempotencyKey : generateIdempotencyKey();
       if (!p.idempotencyKey) {
         await prisma.payout.update({ where: { id: p.id }, data: { idempotencyKey: idem } });
       }

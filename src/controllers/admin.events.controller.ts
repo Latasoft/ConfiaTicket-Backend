@@ -284,5 +284,54 @@ export async function adminSetEventStatus(req: Request, res: Response) {
   res.json(mapEvent(updated));
 }
 
+/**
+ * DELETE /admin/events/:id - Eliminar un evento (solo superadmin)
+ * Permite eliminar eventos antiguos del sistema LEGACY
+ */
+export async function adminDeleteEvent(req: Request, res: Response) {
+  try {
+    const id = toInt(req.params.id, 0);
+    if (!id) return res.status(422).json({ error: 'ID inválido' });
+
+    // Verificar que el evento existe
+    const ev = await prisma.event.findUnique({
+      where: { id },
+      include: {
+        _count: {
+          select: {
+            reservations: true,
+            tickets: true,
+          },
+        },
+      },
+    });
+
+    if (!ev) return res.status(404).json({ error: 'Evento no encontrado' });
+
+    // Verificar si tiene reservas o tickets asociados
+    if (ev._count.reservations > 0 || ev._count.tickets > 0) {
+      return res.status(409).json({
+        error: 'No se puede eliminar el evento porque tiene reservas o tickets asociados',
+        details: {
+          reservations: ev._count.reservations,
+          tickets: ev._count.tickets,
+        },
+      });
+    }
+
+    // Eliminar el evento
+    await prisma.event.delete({
+      where: { id },
+    });
+
+    res.json({ 
+      success: true, 
+      message: 'Evento eliminado correctamente',
+    });
+  } catch (err: any) {
+    console.error('adminDeleteEvent error:', err);
+    res.status(500).json({ error: 'SERVER_ERROR' });
+  }
+}
 
 
