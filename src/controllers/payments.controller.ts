@@ -4,88 +4,34 @@ import prisma from '../prisma/client';
 import { env } from '../config/env';
 import fs from 'fs';
 import path from 'path';
-// ⬇️ Provider de payouts (http/sim)
+// Provider de payouts (http/sim)
 import { getPayoutProvider } from '../services/payouts/provider';
-import { processReservationAfterPayment } from '../services/reservation.service';
+import { queueTicketGeneration } from '../services/ticketGeneration.service';
 import { getPlatformFeeBps, getReservationHoldMinutes, getMaxTicketsPerPurchase } from '../services/config.service';
-import crypto from 'crypto';
-
-// Transbank SDK (Node)
+import { minutesFromNow, now } from '../utils/date.utils';
+import { logPayment } from '../utils/logger';
+// Payment service
 import {
-  WebpayPlus,
-  Options,
-  Environment,
-  IntegrationCommerceCodes,
-  IntegrationApiKeys,
-} from 'transbank-sdk';
+  generateBuyOrder,
+  generateIdempotencyKey,
+  createWebpayPayment,
+  commitWebpayPayment,
+  getWebpayStatus,
+  captureWebpayPayment,
+  refundWebpayPayment,
+  calculatePlatformFee,
+  isPaymentSuccessful,
+  getWebpayErrorMessage,
+  getCommerceCode,
+} from '../services/payment.service';
+// Payout service
+import { createPayout } from '../services/payout.service';
 
 /* ===================== Helpers generales ===================== */
 
 function toInt(v: unknown, def = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? Math.floor(n) : def;
-}
-function now() {
-  return new Date();
-}
-function minutesFromNow(min: number) {
-  return new Date(Date.now() + min * 60 * 1000);
-}
-function hoursFrom(date: Date, hours: number) {
-  return new Date(date.getTime() + Math.max(0, hours) * 3600 * 1000);
-}
-function newIdempotencyKey(prefix = 'payout') {
-  try {
-    return `${prefix}_${crypto.randomUUID()}`;
-  } catch {
-    // Fallback para Node viejo
-    return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-  }
-}
-
-// DEPRECADO: Usar getMaxTicketsPerPurchase() en su lugar
-const MAX_PER_PURCHASE = 4;
-const HOLD_MINUTES = 15;
-
-// ⏱️ Plazo para que el organizador suba el archivo (por defecto 24h)
-const UPLOAD_DEADLINE_HOURS = (() => {
-  const n = Number(env.TICKET_UPLOAD_DEADLINE_HOURS ?? 24);
-  return Number.isFinite(n) && n > 0 ? n : 24;
-})();
-
-// ⏱️ Retención bancaria de la pre-autorización
-const AUTH_HOLD_HOURS = (() => {
-  const n = Number(env.AUTH_HOLD_HOURS ?? 72);
-  return Number.isFinite(n) && n > 0 ? n : 72;
-})();
-
-/** Configura una transacción de WebpayPlus con opciones según .env */
-function tbkTx() {
-  const envName = (env.WEBPAY_ENV || 'INTEGRATION').toUpperCase();
-  const isProd = envName === 'PRODUCTION';
-
-  // Webpay Plus Normal
-  const commerceCode = isProd
-    ? (env.WEBPAY_COMMERCE_CODE || '')
-    : IntegrationCommerceCodes.WEBPAY_PLUS;
-
-  const apiKey = isProd
-    ? (env.WEBPAY_API_KEY || '')
-    : IntegrationApiKeys.WEBPAY;
-
-  const options = new Options(
-    commerceCode,
-    apiKey,
-    isProd ? Environment.Production : Environment.Integration
-  );
-  return new WebpayPlus.Transaction(options);
-}
-
-/** Genera un buyOrder corto y único (TBK suele aceptar ~26–40 chars) */
-function makeBuyOrder(reservationId: number) {
-  const ts = Date.now().toString(36).toUpperCase();
-  const s = `BO-${reservationId}-${ts}`;
-  return s.slice(0, 26);
 }
 
 /** Verifica por token (rápido) si el usuario es organizador aprobado */
@@ -94,7 +40,7 @@ function isOrganizerApproved(_req: Request) {
   return true;
 }
 
-/** ✅ Verifica en BD si el usuario es organizador (puedes afinar según tu schema de aprobación) */
+/** Verifica en BD si el usuario es organizador (puedes afinar según tu schema de aprobación) */
 async function isOrganizerApprovedByDb(req: Request) {
   const userId = (req as any)?.user?.id as number | undefined;
   if (!userId) return false;
@@ -132,11 +78,6 @@ export async function createPayment(req: Request, res: Response) {
       return res.status(500).json({ error: 'Falta configurar WEBPAY_RETURN_URL en .env' });
     }
 
-    const isProd = (env.WEBPAY_ENV || 'INTEGRATION').toUpperCase() === 'PRODUCTION';
-    const commerceCodeForEnv = isProd
-      ? (env.WEBPAY_COMMERCE_CODE || '')
-      : IntegrationCommerceCodes.WEBPAY_PLUS_DEFERRED;
-
     const { reservation, payment, event } = await prisma.$transaction(async (tx) => {
       // Obtener reserva existente de holdReservation
       const reservationData = await tx.reservation.findUnique({
@@ -163,20 +104,21 @@ export async function createPayment(req: Request, res: Response) {
       const event = reservationData.event;
 
       // Renovar expiración para dar tiempo al pago
+      const holdMinutes = await getReservationHoldMinutes();
       await tx.reservation.update({
         where: { id: reservationData.id },
-        data: { expiresAt: minutesFromNow(HOLD_MINUTES) },
+        data: { expiresAt: minutesFromNow(holdMinutes) },
       });
 
       // Usar la reserva original con event incluido
-      const reservation = { ...reservationData, expiresAt: minutesFromNow(HOLD_MINUTES) };
+      const reservation = { ...reservationData, expiresAt: minutesFromNow(holdMinutes) };
 
       // Reusar/actualizar el Payment por reservationId (único)
       let payment = await tx.payment.findUnique({
         where: { reservationId: reservation.id },
       });
 
-      const buyOrder = makeBuyOrder(reservation.id);
+      const buyOrder = generateBuyOrder(reservation.id);
       const sessionId = `u${userId}-r${reservation.id}-${Date.now().toString(36)}`;
       const amount = reservation.amount;
 
@@ -201,8 +143,7 @@ export async function createPayment(req: Request, res: Response) {
             cardLast4: null,
             vci: null,
             environment: env.WEBPAY_ENV || 'INTEGRATION',
-            commerceCode: commerceCodeForEnv,
-            isDeferredCapture: true,
+            commerceCode: getCommerceCode(),
           },
         });
       } else {
@@ -214,8 +155,7 @@ export async function createPayment(req: Request, res: Response) {
             buyOrder,
             sessionId,
             environment: env.WEBPAY_ENV || 'INTEGRATION',
-            commerceCode: commerceCodeForEnv,
-            isDeferredCapture: false, // Captura inmediata
+            commerceCode: getCommerceCode(),
           },
         });
       }
@@ -223,25 +163,24 @@ export async function createPayment(req: Request, res: Response) {
       return { reservation, payment, event };
     });
 
-    // Crear transacción en Webpay
-    const tx = tbkTx();
-    const createResp = await tx.create(
-      payment.buyOrder!,
-      payment.sessionId!,
-      payment.amount,
-      env.WEBPAY_RETURN_URL!
-    );
+    // Crear transacción en Webpay usando el servicio
+    const webpayResponse = await createWebpayPayment({
+      buyOrder: payment.buyOrder!,
+      sessionId: payment.sessionId!,
+      amount: payment.amount,
+      returnUrl: env.WEBPAY_RETURN_URL!,
+    });
 
     // Guarda el token
     await prisma.payment.update({
       where: { id: payment.id },
-      data: { token: createResp.token },
+      data: { token: webpayResponse.token },
     });
 
     // Entrega al front la url y el token para redirigir
     return res.status(200).json({
-      url: createResp.url,
-      token: createResp.token,
+      url: webpayResponse.url,
+      token: webpayResponse.token,
       reservationId: reservation.id,
       eventId: event.id,
       amount: payment.amount,
@@ -309,10 +248,9 @@ export async function commitPayment(req: Request, res: Response) {
 
     console.log('🔵 [COMMIT] Token recibido:', token);
 
-    // Ejecuta commit en Webpay
-    const tx = tbkTx();
+    // Ejecuta commit en Webpay usando el servicio
     console.log('🔵 [COMMIT] Llamando a Transbank commit...');
-    const commit = await tx.commit(token);
+    const commit = await commitWebpayPayment(token);
     console.log('🔵 [COMMIT] Respuesta de Transbank:', JSON.stringify(commit, null, 2));
 
     const payment = await prisma.payment.findUnique({
@@ -398,34 +336,31 @@ export async function commitPayment(req: Request, res: Response) {
 
       // Crear Payout PENDING si hay cuenta conectada
       if (isApproved && !isOwnEvent && finalDestAccountId && payment.reservationId) {
-        await txp.payout.create({
-          data: {
-            accountId: finalDestAccountId,
-            reservationId: payment.reservationId,
-            paymentId: payment.id,
-            amount: netAmount,
-            status: 'PENDING',
-            currency: 'CLP',
-            idempotencyKey: newIdempotencyKey(),
-          },
+        await createPayout({
+          accountId: finalDestAccountId,
+          reservationId: payment.reservationId,
+          paymentId: payment.id,
+          amount: netAmount,
+          prismaClient: txp,
         });
       }
     });
 
     console.log('✅ [COMMIT] Transacción actualizada en BD');
+    
+    // LOG: Payment success
+    if (isApproved && !isOwnEvent && payment.reservationId) {
+      logPayment.success(payment.reservationId, payment.id, payment.amount);
+    } else if (!isApproved) {
+      logPayment.failed(payment.reservationId || 0, payment.id, 'Payment not approved by PSP');
+    }
 
     // Procesar reserva: generar PDFs (OWN) o marcar vendido (RESALE)
     if (isApproved && !isOwnEvent && payment.reservationId) {
       console.log('🔵 [COMMIT] Iniciando procesamiento asíncrono de reserva:', payment.reservationId);
       
-      // No esperar (fire and forget) - la redirección debe ser inmediata
-      processReservationAfterPayment(payment.reservationId)
-        .then(() => {
-          console.log('✅ [COMMIT] Reserva procesada exitosamente (async)');
-        })
-        .catch((pdfError) => {
-          console.error('❌ [COMMIT] Error procesando reserva (async):', pdfError);
-        });
+      // Sistema de cola con retry automático
+      queueTicketGeneration(payment.reservationId);
     }
 
     const payload: any = {
@@ -524,14 +459,13 @@ export async function capturePayment(req: Request, res: Response) {
 
     const captureAmount = payment.amount;
 
-    // Ejecuta captura en Webpay
-    const tx = tbkTx();
-    const cap = await tx.capture(
-      payment.token,
-      payment.buyOrder,
-      payment.authorizationCode,
-      captureAmount
-    );
+    // Ejecuta captura en Webpay usando el servicio
+    const cap = await captureWebpayPayment({
+      token: payment.token,
+      buyOrder: payment.buyOrder,
+      authorizationCode: payment.authorizationCode,
+      amount: captureAmount,
+    });
 
     // cap.response_code === 0 indica captura exitosa
     const ok = cap?.response_code === 0;
@@ -581,31 +515,23 @@ export async function capturePayment(req: Request, res: Response) {
       let payout = null;
       if (destAccountId) {
         const netAmountForPayout = pay.netAmount ?? computedNet;
-        payout = await txp.payout.create({
-          data: {
-            accountId: destAccountId,
-            reservationId: resv.id,
-            paymentId: pay.id,
-            amount: netAmountForPayout,
-            status: 'PENDING',
-            currency: 'CLP',
-            idempotencyKey: newIdempotencyKey(), // <-- requerido por schema
-          },
+        payout = await createPayout({
+          accountId: destAccountId,
+          reservationId: resv.id,
+          paymentId: pay.id,
+          amount: netAmountForPayout,
+          prismaClient: txp,
         });
       }
 
       return { pay, resv, payout };
     });
 
-    // Procesar reserva de forma asíncrona 
-    processReservationAfterPayment(updated.resv.id)
-      .then(() => {
-        console.log('✅ [OWN_EVENT] Reserva procesada exitosamente (async):', updated.resv.id);
-      })
-      .catch((pdfError) => {
-        console.error('❌ [OWN_EVENT] Error procesando reserva (async):', pdfError);
-        // No afecta la respuesta, el pago ya se confirmó
-      });
+    // LOG: Capture success
+    logPayment.capture(updated.resv.id, updated.pay.id, captureAmount);
+    
+    // Procesar reserva con sistema de cola con retry
+    queueTicketGeneration(updated.resv.id);
 
     return res.status(200).json({
       ok: true,
@@ -616,6 +542,10 @@ export async function capturePayment(req: Request, res: Response) {
     });
   } catch (err: any) {
     console.error('capturePayment error:', err);
+    // LOG: Capture failed
+    if ((req.body as any)?.reservationId) {
+      logPayment.failed((req.body as any).reservationId, 0, err);
+    }
     return res.status(500).json({ error: err?.message || 'Error al capturar el pago' });
   }
 }
@@ -629,8 +559,7 @@ export async function getPaymentStatus(req: Request, res: Response) {
     const token = String(req.params?.token || '').trim();
     if (!token) return res.status(400).json({ error: 'token faltante' });
 
-    const tx = tbkTx();
-    const status = await tx.status(token).catch(() => null);
+    const status = await getWebpayStatus(token).catch(() => null);
 
     const payment = await prisma.payment.findUnique({
       where: { token },
@@ -797,19 +726,15 @@ export async function restartPayment(req: Request, res: Response) {
     }
 
     // Refrescar hold para dar tiempo al reintento
+    const holdMinutes = await getReservationHoldMinutes();
     await prisma.reservation.update({
       where: { id: reservation.id },
-      data: { expiresAt: minutesFromNow(HOLD_MINUTES) },
+      data: { expiresAt: minutesFromNow(holdMinutes) },
     });
 
-    const buyOrder = makeBuyOrder(reservation.id);
+    const buyOrder = generateBuyOrder(reservation.id);
     const sessionId = `u${userId}-r${reservation.id}-${Date.now().toString(36)}`;
     const amount = reservation.amount;
-
-    const isProd = (env.WEBPAY_ENV || 'INTEGRATION').toUpperCase() === 'PRODUCTION';
-    const commerceCodeForEnv = isProd
-      ? (env.WEBPAY_COMMERCE_CODE || '')
-      : IntegrationCommerceCodes.WEBPAY_PLUS_DEFERRED;
 
     // Busca payment por reservationId (único) y actualiza o crea
     let payment = await prisma.payment.findUnique({
@@ -837,8 +762,8 @@ export async function restartPayment(req: Request, res: Response) {
           cardLast4: null,
           vci: null,
           environment: env.WEBPAY_ENV || 'INTEGRATION',
-          commerceCode: commerceCodeForEnv,
-          isDeferredCapture: true,
+          commerceCode: getCommerceCode(),
+          // ❌ REMOVED: isDeferredCapture (nuevo flujo = captura inmediata)
         },
       });
     } else {
@@ -850,24 +775,28 @@ export async function restartPayment(req: Request, res: Response) {
           buyOrder,
           sessionId,
           environment: env.WEBPAY_ENV || 'INTEGRATION',
-          commerceCode: commerceCodeForEnv,
-          isDeferredCapture: true,
+          commerceCode: getCommerceCode(),
+          // ❌ REMOVED: isDeferredCapture (nuevo flujo = captura inmediata)
         },
       });
     }
 
-    // Nueva transacción TBK
-    const tx = tbkTx();
-    const createResp = await tx.create(buyOrder, sessionId, amount, env.WEBPAY_RETURN_URL!);
+    // Nueva transacción Webpay usando el servicio
+    const webpayResponse = await createWebpayPayment({
+      buyOrder,
+      sessionId,
+      amount,
+      returnUrl: env.WEBPAY_RETURN_URL!,
+    });
 
     await prisma.payment.update({
       where: { id: payment.id },
-      data: { token: createResp.token },
+      data: { token: webpayResponse.token },
     });
 
     return res.status(200).json({
-      url: createResp.url,
-      token: createResp.token,
+      url: webpayResponse.url,
+      token: webpayResponse.token,
       reservationId: reservation.id,
       eventId: reservation.eventId,
       amount,
@@ -909,8 +838,10 @@ export async function refundPayment(req: Request, res: Response) {
     if (amount > maxRefundable)
       return res.status(400).json({ error: `Máximo reembolsable: ${maxRefundable}` });
 
-    const tx = tbkTx();
-    const tbkResp = await tx.refund(payment.token!, amount);
+    const tbkResp = await refundWebpayPayment({
+      token: payment.token!,
+      amount,
+    });
 
     const newRefunded = already + amount;
     const fullyRefunded = newRefunded >= payment.amount;
@@ -1538,14 +1469,13 @@ export async function adminApproveAndCapture(req: Request, res: Response) {
 
     const captureAmount = payment.amount;
 
-    // 1) Capturar en Webpay
-    const tx = tbkTx();
-    const cap = await tx.capture(
-      payment.token,
-      payment.buyOrder,
-      payment.authorizationCode,
-      captureAmount
-    );
+    // 1) Capturar en Webpay usando el servicio
+    const cap = await captureWebpayPayment({
+      token: payment.token,
+      buyOrder: payment.buyOrder,
+      authorizationCode: payment.authorizationCode,
+      amount: captureAmount,
+    });
     if (!cap || cap.response_code !== 0) {
       return res.status(400).json({
         ok: false,
@@ -1596,18 +1526,13 @@ export async function adminApproveAndCapture(req: Request, res: Response) {
       let payout = null as null | { id: number; amount: number; currency: string; accountId: number };
       if (destAccountId) {
         const netAmountForPayout = pay.netAmount ?? computedNet;
-        const created = await txp.payout.create({
-          data: {
-            accountId: destAccountId,
-            reservationId: resv.id,
-            paymentId: pay.id,
-            amount: netAmountForPayout,
-            status: 'PENDING',
-            currency: 'CLP',
-            source: 'INTERNAL',
-            idempotencyKey: newIdempotencyKey(), // <-- requerido por schema
-          },
-          select: { id: true, amount: true, currency: true, accountId: true },
+        const created = await createPayout({
+          accountId: destAccountId,
+          reservationId: resv.id,
+          paymentId: pay.id,
+          amount: netAmountForPayout,
+          source: 'INTERNAL',
+          prismaClient: txp,
         });
         payout = created;
       }
