@@ -66,17 +66,24 @@ async function isOrganizerApprovedByDb(req: Request) {
 export async function createPayment(req: Request, res: Response) {
   try {
     const userId = (req as any)?.user?.id as number | undefined;
+    console.log('[CREATE_PAYMENT] Iniciando createPayment para usuario:', userId);
+    
     if (!userId) return res.status(401).json({ error: 'No autenticado' });
 
     const reservationId = toInt(req.body?.reservationId);
+    console.log('[CREATE_PAYMENT] reservationId:', reservationId);
     
     if (!reservationId) {
       return res.status(400).json({ error: 'reservationId requerido' });
     }
     
     if (!env.WEBPAY_RETURN_URL) {
+      console.error('[CREATE_PAYMENT] ERROR: WEBPAY_RETURN_URL no configurada');
       return res.status(500).json({ error: 'Falta configurar WEBPAY_RETURN_URL en .env' });
     }
+    
+    console.log('[CREATE_PAYMENT] WEBPAY_RETURN_URL:', env.WEBPAY_RETURN_URL);
+    console.log('[CREATE_PAYMENT] WEBPAY_ENV:', env.WEBPAY_ENV);
 
     const { reservation, payment, event } = await prisma.$transaction(async (tx) => {
       // Obtener reserva existente de holdReservation
@@ -163,6 +170,14 @@ export async function createPayment(req: Request, res: Response) {
       return { reservation, payment, event };
     });
 
+    console.log('[CREATE_PAYMENT] Creando transacción en WebPay...');
+    console.log('[CREATE_PAYMENT] Parámetros:', {
+      buyOrder: payment.buyOrder,
+      sessionId: payment.sessionId,
+      amount: payment.amount,
+      returnUrl: env.WEBPAY_RETURN_URL,
+    });
+
     // Crear transacción en Webpay usando el servicio
     const webpayResponse = await createWebpayPayment({
       buyOrder: payment.buyOrder!,
@@ -171,11 +186,17 @@ export async function createPayment(req: Request, res: Response) {
       returnUrl: env.WEBPAY_RETURN_URL!,
     });
 
+    console.log('[CREATE_PAYMENT] Respuesta de WebPay recibida');
+    console.log('[CREATE_PAYMENT] URL:', webpayResponse.url);
+    console.log('[CREATE_PAYMENT] Token (primeros 20 chars):', webpayResponse.token.substring(0, 20) + '...');
+
     // Guarda el token
     await prisma.payment.update({
       where: { id: payment.id },
       data: { token: webpayResponse.token },
     });
+
+    console.log('[CREATE_PAYMENT] Token guardado en BD. Enviando respuesta al frontend...');
 
     // Entrega al front la url y el token para redirigir
     return res.status(200).json({
@@ -187,7 +208,8 @@ export async function createPayment(req: Request, res: Response) {
       holdExpiresAt: reservation.expiresAt,
     });
   } catch (err: any) {
-    console.error('createPayment error:', err);
+    console.error('[CREATE_PAYMENT] ERROR:', err);
+    console.error('[CREATE_PAYMENT] Stack:', err?.stack);
     const status = Number.isInteger(err?.status) ? err.status : (err?.message === 'CANNOT_BUY_OWN_EVENT' ? 403 : 400);
     const message = err?.message || 'Error creando el pago';
     return res.status(status).json({ error: message });
