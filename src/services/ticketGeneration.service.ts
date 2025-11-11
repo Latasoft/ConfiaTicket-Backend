@@ -281,7 +281,7 @@ export async function queueTicketGeneration(reservationId: number): Promise<void
       if (result.success) {
         console.log(`✅ [TICKET_QUEUE] Tickets generados para reserva ${reservationId}`);
         
-        // Enviar emails de confirmación
+        // Enviar emails de confirmación (solo una vez por grupo de compra)
         try {
           const reservation = await prisma.reservation.findUnique({
             where: { id: reservationId },
@@ -294,30 +294,79 @@ export async function queueTicketGeneration(reservationId: number): Promise<void
           if (reservation && reservation.event && reservation.buyer) {
             const { event, buyer } = reservation;
 
-            // Email de confirmación al comprador
-            await sendPurchaseConfirmationEmail({
-              buyerEmail: buyer.email,
-              buyerName: buyer.name,
-              eventTitle: event.title,
-              eventDate: event.date,
-              eventLocation: event.location,
-              quantity: reservation.quantity,
-              totalAmount: reservation.amount,
-              reservationCode: reservation.code,
-              reservationId: reservation.id,
-            });
+            // Verificar si esta reserva tiene purchaseGroupId (compra múltiple)
+            if (reservation.purchaseGroupId) {
+              // Verificar si ya enviamos email para este grupo
+              const allGroupReservations = await prisma.reservation.findMany({
+                where: { purchaseGroupId: reservation.purchaseGroupId },
+                orderBy: { id: 'asc' },
+                select: { id: true, quantity: true, amount: true },
+              });
 
-            // Notificación al admin
-            await sendPurchaseNotificationToAdmin({
-              buyerName: buyer.name,
-              buyerEmail: buyer.email,
-              eventTitle: event.title,
-              quantity: reservation.quantity,
-              totalAmount: reservation.amount,
-              reservationId: reservation.id,
-            });
+              // Solo enviar email si esta es la PRIMERA reserva del grupo
+              const isFirstReservation = allGroupReservations[0]?.id === reservationId;
+              
+              if (isFirstReservation) {
+                // Calcular totales del grupo completo
+                const totalQuantity = allGroupReservations.reduce((sum, r) => sum + r.quantity, 0);
+                const totalAmount = allGroupReservations.reduce((sum, r) => sum + r.amount, 0);
 
-            console.log(`✉️ [TICKET_QUEUE] Emails enviados para reserva ${reservationId}`);
+                console.log(`📧 [TICKET_QUEUE] Enviando email grupal para purchaseGroup ${reservation.purchaseGroupId}`);
+                console.log(`   Total reservas: ${allGroupReservations.length}, Cantidad: ${totalQuantity}, Monto: ${totalAmount}`);
+
+                // Email de confirmación al comprador con totales del grupo
+                await sendPurchaseConfirmationEmail({
+                  buyerEmail: buyer.email,
+                  buyerName: buyer.name,
+                  eventTitle: event.title,
+                  eventDate: event.date,
+                  eventLocation: event.location,
+                  quantity: totalQuantity,
+                  totalAmount: totalAmount,
+                  reservationCode: reservation.code,
+                  reservationId: reservation.id,
+                });
+
+                // Notificación al admin con totales del grupo
+                await sendPurchaseNotificationToAdmin({
+                  buyerName: buyer.name,
+                  buyerEmail: buyer.email,
+                  eventTitle: event.title,
+                  quantity: totalQuantity,
+                  totalAmount: totalAmount,
+                  reservationId: reservation.id,
+                });
+
+                console.log(`✉️ [TICKET_QUEUE] Email grupal enviado para grupo ${reservation.purchaseGroupId}`);
+              } else {
+                console.log(`⏭️ [TICKET_QUEUE] Email ya enviado para grupo ${reservation.purchaseGroupId}, saltando reserva ${reservationId}`);
+              }
+            } else {
+              // Compra simple sin grupo - enviar email normalmente
+              await sendPurchaseConfirmationEmail({
+                buyerEmail: buyer.email,
+                buyerName: buyer.name,
+                eventTitle: event.title,
+                eventDate: event.date,
+                eventLocation: event.location,
+                quantity: reservation.quantity,
+                totalAmount: reservation.amount,
+                reservationCode: reservation.code,
+                reservationId: reservation.id,
+              });
+
+              // Notificación al admin
+              await sendPurchaseNotificationToAdmin({
+                buyerName: buyer.name,
+                buyerEmail: buyer.email,
+                eventTitle: event.title,
+                quantity: reservation.quantity,
+                totalAmount: reservation.amount,
+                reservationId: reservation.id,
+              });
+
+              console.log(`✉️ [TICKET_QUEUE] Email individual enviado para reserva ${reservationId}`);
+            }
           }
         } catch (emailError: any) {
           console.error(`❌ [TICKET_QUEUE] Error enviando emails para reserva ${reservationId}:`, emailError.message);

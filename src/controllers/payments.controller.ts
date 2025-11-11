@@ -57,11 +57,11 @@ async function isOrganizerApprovedByDb(req: Request) {
 
 /**
  * POST /api/payments/create
- * Body: { eventId: number, quantity: number }
+ * Body: { reservationId?: number, purchaseGroupId?: string }
  * Requiere usuario autenticado (usa req.user?.id)
- * - Si ya existe una reserva PENDING_PAYMENT vigente del usuario para ese evento,
- *   la reutiliza y refresca el hold.
- * - Reusa/actualiza el Payment de esa reserva (un único payment por reservationId).
+ * - Acepta purchaseGroupId para compras múltiples (varias secciones)
+ * - Acepta reservationId para compras simples (compatibilidad)
+ * - Crea un único Payment que agrupa todas las reservas del grupo
  */
 export async function createPayment(req: Request, res: Response) {
   try {
@@ -71,10 +71,13 @@ export async function createPayment(req: Request, res: Response) {
     if (!userId) return res.status(401).json({ error: 'No autenticado' });
 
     const reservationId = toInt(req.body?.reservationId);
-    console.log('[CREATE_PAYMENT] reservationId:', reservationId);
+    const purchaseGroupId = req.body?.purchaseGroupId;
     
-    if (!reservationId) {
-      return res.status(400).json({ error: 'reservationId requerido' });
+    console.log('[CREATE_PAYMENT] reservationId:', reservationId);
+    console.log('[CREATE_PAYMENT] purchaseGroupId:', purchaseGroupId);
+    
+    if (!reservationId && !purchaseGroupId) {
+      return res.status(400).json({ error: 'reservationId o purchaseGroupId requerido' });
     }
     
     if (!env.WEBPAY_RETURN_URL) {
@@ -85,58 +88,106 @@ export async function createPayment(req: Request, res: Response) {
     console.log('[CREATE_PAYMENT] WEBPAY_RETURN_URL:', env.WEBPAY_RETURN_URL);
     console.log('[CREATE_PAYMENT] WEBPAY_ENV:', env.WEBPAY_ENV);
 
-    const { reservation, payment, event } = await prisma.$transaction(async (tx) => {
-      // Obtener reserva existente de holdReservation
-      const reservationData = await tx.reservation.findUnique({
-        where: { id: reservationId },
-        include: { event: true },
-      });
-
-      if (!reservationData) throw new Error('Reserva no encontrada');
-      if (reservationData.buyerId !== userId) {
+    const { reservations, payment, event, totalAmount } = await prisma.$transaction(async (tx) => {
+      // Obtener reservas del grupo o reserva individual
+      let reservations: Array<any>;
+      
+      if (purchaseGroupId) {
+        // Modo grupo: obtener todas las reservas del grupo
+        reservations = await tx.reservation.findMany({
+          where: { 
+            purchaseGroupId,
+            buyerId: userId,
+          },
+          include: { event: true },
+        });
+        
+        if (reservations.length === 0) {
+          throw new Error('No se encontraron reservas para este grupo de compra');
+        }
+      } else {
+        // Modo simple: obtener reserva individual
+        const reservation = await tx.reservation.findUnique({
+          where: { id: reservationId },
+          include: { event: true },
+        });
+        
+        if (!reservation) throw new Error('Reserva no encontrada');
+        
+        reservations = [reservation];
+      }
+      
+      // Validar que todas las reservas pertenezcan al usuario
+      const invalidReservation = reservations.find(r => r.buyerId !== userId);
+      if (invalidReservation) {
         const e: any = new Error('No autorizado');
         e.status = 403;
         throw e;
       }
-      if (reservationData.status === 'PAID') {
-        throw new Error('La reserva ya fue pagada');
-      }
-      if (reservationData.status === 'CANCELED' || reservationData.status === 'EXPIRED') {
-        throw new Error('La reserva ya expiró o fue cancelada');
-      }
-      if (reservationData.expiresAt && new Date(reservationData.expiresAt) <= now()) {
-        throw new Error('La reserva expiró');
+      
+      // Validar estado de las reservas
+      for (const res of reservations) {
+        if (res.status === 'PAID') {
+          throw new Error('Al menos una reserva ya fue pagada');
+        }
+        if (res.status === 'CANCELED' || res.status === 'EXPIRED') {
+          throw new Error('Al menos una reserva expiró o fue cancelada');
+        }
+        if (res.expiresAt && new Date(res.expiresAt) <= now()) {
+          throw new Error('Al menos una reserva expiró');
+        }
       }
 
-      const event = reservationData.event;
+      const event = reservations[0]!.event;
+      
+      // Calcular monto total de todas las reservas
+      const totalAmount = reservations.reduce((sum, r) => sum + (r.amount || 0), 0);
+      console.log('[CREATE_PAYMENT] Total de reservas:', reservations.length);
+      console.log('[CREATE_PAYMENT] Monto total:', totalAmount);
+      reservations.forEach((r, i) => {
+        console.log(`[CREATE_PAYMENT]   Reserva ${i + 1}: ID=${r.id}, Cantidad=${r.quantity}, Monto=${r.amount}`);
+      });
 
-      // Renovar expiración para dar tiempo al pago
+      // Renovar expiración de todas las reservas para dar tiempo al pago
       const holdMinutes = await getReservationHoldMinutes();
-      await tx.reservation.update({
-        where: { id: reservationData.id },
-        data: { expiresAt: minutesFromNow(holdMinutes) },
-      });
+      const newExpiresAt = minutesFromNow(holdMinutes);
+      
+      if (purchaseGroupId) {
+        await tx.reservation.updateMany({
+          where: { purchaseGroupId },
+          data: { expiresAt: newExpiresAt },
+        });
+      } else {
+        await tx.reservation.update({
+          where: { id: reservationId },
+          data: { expiresAt: newExpiresAt },
+        });
+      }
 
-      // Usar la reserva original con event incluido
-      const reservation = { ...reservationData, expiresAt: minutesFromNow(holdMinutes) };
+      // Buscar si ya existe un Payment para este grupo o reserva
+      let payment = purchaseGroupId
+        ? await tx.payment.findFirst({
+            where: {
+              reservation: { purchaseGroupId },
+            },
+          })
+        : await tx.payment.findUnique({
+            where: { reservationId: reservationId },
+          });
 
-      // Reusar/actualizar el Payment por reservationId (único)
-      let payment = await tx.payment.findUnique({
-        where: { reservationId: reservation.id },
-      });
-
-      const buyOrder = generateBuyOrder(reservation.id);
-      const sessionId = `u${userId}-r${reservation.id}-${Date.now().toString(36)}`;
-      const amount = reservation.amount;
+      // Usar la primera reserva como referencia principal para el Payment
+      const primaryReservation = reservations[0]!;
+      const buyOrder = generateBuyOrder(primaryReservation.id);
+      const sessionId = `u${userId}-r${primaryReservation.id}-${Date.now().toString(36)}`;
 
       if (payment) {
         if (payment.status === 'CAPTURED' || payment.status === 'COMMITTED') {
-          throw new Error('La reserva ya fue pagada');
+          throw new Error('El pago ya fue procesado');
         }
         payment = await tx.payment.update({
           where: { id: payment.id },
           data: {
-            amount,
+            amount: totalAmount,
             status: 'INITIATED',
             buyOrder,
             sessionId,
@@ -156,8 +207,8 @@ export async function createPayment(req: Request, res: Response) {
       } else {
         payment = await tx.payment.create({
           data: {
-            reservationId: reservation.id,
-            amount,
+            reservationId: primaryReservation.id,
+            amount: totalAmount,
             status: 'INITIATED',
             buyOrder,
             sessionId,
@@ -167,14 +218,14 @@ export async function createPayment(req: Request, res: Response) {
         });
       }
 
-      return { reservation, payment, event };
+      return { reservations, payment, event, totalAmount };
     });
 
     console.log('[CREATE_PAYMENT] Creando transacción en WebPay...');
     console.log('[CREATE_PAYMENT] Parámetros:', {
       buyOrder: payment.buyOrder,
       sessionId: payment.sessionId,
-      amount: payment.amount,
+      amount: totalAmount,
       returnUrl: env.WEBPAY_RETURN_URL,
     });
 
@@ -182,7 +233,7 @@ export async function createPayment(req: Request, res: Response) {
     const webpayResponse = await createWebpayPayment({
       buyOrder: payment.buyOrder!,
       sessionId: payment.sessionId!,
-      amount: payment.amount,
+      amount: totalAmount,
       returnUrl: env.WEBPAY_RETURN_URL!,
     });
 
@@ -199,13 +250,16 @@ export async function createPayment(req: Request, res: Response) {
     console.log('[CREATE_PAYMENT] Token guardado en BD. Enviando respuesta al frontend...');
 
     // Entrega al front la url y el token para redirigir
+    const primaryReservation = reservations[0]!;
     return res.status(200).json({
       url: webpayResponse.url,
       token: webpayResponse.token,
-      reservationId: reservation.id,
+      reservationId: primaryReservation.id,
+      purchaseGroupId: primaryReservation.purchaseGroupId,
       eventId: event.id,
-      amount: payment.amount,
-      holdExpiresAt: reservation.expiresAt,
+      amount: totalAmount,
+      reservationsCount: reservations.length,
+      holdExpiresAt: primaryReservation.expiresAt,
     });
   } catch (err: any) {
     console.error('[CREATE_PAYMENT] ERROR:', err);
@@ -266,7 +320,19 @@ export async function commitPayment(req: Request, res: Response) {
       return res.status(200).json({ ok: false, aborted: true, buyOrder: tbkOrder || null });
     }
 
-    if (!token) return res.status(400).json({ error: 'token_ws faltante' });
+    // Si no hay token ni TBK_TOKEN, es un error/timeout
+    if (!token) {
+      console.error('❌ [COMMIT] ERROR: token_ws faltante - posible timeout o error de Webpay');
+      
+      if (env.WEBPAY_FINAL_URL) {
+        const u = new URL(env.WEBPAY_FINAL_URL);
+        u.searchParams.set('status', 'timeout');
+        u.searchParams.set('error', 'El pago expiró o fue cancelado');
+        return res.redirect(303, u.toString());
+      }
+      
+      return res.status(400).json({ error: 'token_ws faltante - pago expirado o cancelado' });
+    }
 
     console.log('🔵 [COMMIT] Token recibido:', token);
 
@@ -291,10 +357,25 @@ export async function commitPayment(req: Request, res: Response) {
     
     if (!payment) {
       console.error('❌ [COMMIT] ERROR: Transacción no encontrada para token:', token);
+      
+      if (env.WEBPAY_FINAL_URL) {
+        const u = new URL(env.WEBPAY_FINAL_URL);
+        u.searchParams.set('status', 'error');
+        u.searchParams.set('error', 'Transacción no encontrada');
+        return res.redirect(303, u.toString());
+      }
+      
       return res.status(404).json({ error: 'Transacción no encontrada' });
     }
 
     const isApproved = !!commit && commit.response_code === 0;
+    
+    // Determinar el tipo de fallo basado en response_code
+    // 0: Aprobada
+    // -1, -4: Rechazada por el banco (sin fondos, etc.)
+    // -2: Anulada por el usuario
+    // -3, -5: Error/timeout
+    const isAborted = commit.response_code === -2;
     
     // Verificar si el comprador es el organizador (caso prohibido)
     const buyerIsOrganizer =
@@ -304,7 +385,7 @@ export async function commitPayment(req: Request, res: Response) {
     // Verificar si es un evento de reventa (RESALE)
     const isResaleEvent = payment.reservation?.event?.eventType === 'RESALE';
 
-    console.log('🔵 [COMMIT] isApproved:', isApproved, 'buyerIsOrganizer:', buyerIsOrganizer, 'isResaleEvent:', isResaleEvent);
+    console.log('🔵 [COMMIT] isApproved:', isApproved, 'isAborted:', isAborted, 'buyerIsOrganizer:', buyerIsOrganizer, 'isResaleEvent:', isResaleEvent);
     console.log('🔵 [COMMIT] response_code:', commit.response_code);
 
     // Detectar cuenta conectada del organizador para enrutar payout (solo RESALE)
@@ -325,11 +406,19 @@ export async function commitPayment(req: Request, res: Response) {
 
     await prisma.$transaction(async (txp) => {
       // Actualizar Payment con información de Transbank
+      // Determinar el estado del pago según el resultado
+      let paymentStatus: 'COMMITTED' | 'FAILED' | 'ABORTED' = 'FAILED';
+      if (isApproved && !buyerIsOrganizer) {
+        paymentStatus = 'COMMITTED';
+      } else if (!isApproved && isAborted) {
+        paymentStatus = 'ABORTED';
+      }
+      // Si no es aprobado ni anulado, queda como FAILED
+      
       await txp.payment.update({
         where: { id: payment.id },
         data: {
-          // Captura inmediata: COMMITTED si aprobado y no es el organizador comprando su propio evento
-          status: isApproved && !buyerIsOrganizer ? 'COMMITTED' : 'FAILED',
+          status: paymentStatus,
           authorizationCode: (commit as any)?.authorization_code || null,
           paymentTypeCode: (commit as any)?.payment_type_code || null,
           installmentsNumber: (commit as any)?.installments_number ?? null,
@@ -466,11 +555,28 @@ export async function commitPayment(req: Request, res: Response) {
       // Fallback: ruta legacy payment-result (solo para errores)
       let baseUrl = env.WEBPAY_FINAL_URL.replace(/\/payment-result\/?$/, '').replace(/\/eventos\/?$/, '');
       const u = new URL(`${baseUrl}/payment-result`);
-      u.searchParams.set('status', payload.ok ? 'success' : (buyerIsOrganizer ? 'own-event-forbidden' : 'failed'));
+      
+      // Determinar el estado según el resultado
+      let statusParam = 'failed'; // Por defecto: rechazado
+      if (payload.ok) {
+        statusParam = 'success';
+      } else if (buyerIsOrganizer) {
+        statusParam = 'own-event-forbidden';
+      } else if (isAborted) {
+        statusParam = 'aborted'; // Usuario canceló en Webpay
+      }
+      // Si no es ninguno de los anteriores, queda 'failed' (rechazado por el banco)
+      
+      u.searchParams.set('status', statusParam);
       u.searchParams.set('token', token);
       u.searchParams.set('buyOrder', payment.buyOrder || '');
       u.searchParams.set('amount', String(payment.amount));
       if (payment.reservationId) u.searchParams.set('reservationId', String(payment.reservationId));
+      if (!payload.ok && !isAborted) {
+        // Agregar mensaje de error para pagos rechazados
+        const errorMsg = `Pago rechazado por el banco (código: ${commit.response_code || 'desconocido'})`;
+        u.searchParams.set('error', errorMsg);
+      }
       console.log('⚠️ [COMMIT] Redirigiendo a fallback:', u.toString());
       return res.redirect(303, u.toString());
     }
@@ -479,7 +585,9 @@ export async function commitPayment(req: Request, res: Response) {
     return res.status(payload.ok ? 200 : (buyerIsOrganizer ? 403 : 200)).json(payload);
   } catch (err: any) {
     console.error('commitPayment error:', err);
-    return res.status(500).json({ error: err?.message || 'Error al confirmar el pago' });
+    // Redirigir al frontend con error en lugar de devolver JSON
+    const errorMsg = encodeURIComponent(err?.message || 'Error al confirmar el pago');
+    return res.redirect(303, `${env.WEBPAY_FINAL_URL}?status=error&error=${errorMsg}`);
   }
 }
 
