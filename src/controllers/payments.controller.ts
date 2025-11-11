@@ -282,85 +282,168 @@ export async function createPayment(req: Request, res: Response) {
  *  - NUEVO: si el organizador tiene ConnectedAccount, guardamos destinationAccountId en Payment.
  */
 export async function commitPayment(req: Request, res: Response) {
-  console.log('🔵 [COMMIT] Iniciando commitPayment');
-  console.log('🔵 [COMMIT] Method:', req.method);
-  console.log('🔵 [COMMIT] Headers:', JSON.stringify(req.headers, null, 2));
-  console.log('🔵 [COMMIT] Body:', JSON.stringify(req.body, null, 2));
-  console.log('🔵 [COMMIT] Query:', JSON.stringify(req.query, null, 2));
+  console.log('[COMMIT] Iniciando commitPayment');
+  console.log('[COMMIT] Method:', req.method);
+  console.log('[COMMIT] Headers:', JSON.stringify(req.headers, null, 2));
+  console.log('[COMMIT] Body:', JSON.stringify(req.body, null, 2));
+  console.log('[COMMIT] Query:', JSON.stringify(req.query, null, 2));
   
   try {
     const token = String(
       (req.body?.token_ws ?? req.query?.token_ws ?? '')
     ).trim();
 
-    // Caso abortado por el usuario
     const tbkToken = String(
       (req.body?.TBK_TOKEN ?? req.query?.TBK_TOKEN ?? '')
     ).trim();
 
-    if (!token && tbkToken) {
-      const tbkOrder = String(
-        (req.body?.TBK_ORDEN_COMPRA ?? req.query?.TBK_ORDEN_COMPRA ?? '')
-      ).trim();
+    const tbkOrder = String(
+      (req.body?.TBK_ORDEN_COMPRA ?? req.query?.TBK_ORDEN_COMPRA ?? '')
+    ).trim();
 
-      // Marca como ABORTED si hay match local
+    const tbkIdSesion = String(
+      (req.body?.TBK_ID_SESION ?? req.query?.TBK_ID_SESION ?? '')
+    ).trim();
+
+    // ========================================
+    // CASO 1: Error en formulario de pago (recuperar tab)
+    // Llega: token_ws + TBK_TOKEN + TBK_ID_SESION + TBK_ORDEN_COMPRA
+    // En producción: cuando abres formulario, cierras tab y lo recuperas
+    // ========================================
+    if (token && tbkToken) {
+      console.log('[COMMIT] Caso borde: Error en formulario (recuperar tab) - Ignorando TBK_TOKEN, procesando token_ws');
+      // Ignoramos TBK_TOKEN y procesamos normalmente con token_ws
+      // Continuar con el flujo normal (no hacer return aquí)
+    }
+    
+    // ========================================
+    // CASO 2: Usuario canceló/anulo (cerró ventana sin completar)
+    // Llega: TBK_TOKEN + TBK_ORDEN_COMPRA (SIN token_ws)
+    // NO se debe llamar a commit()
+    // ========================================
+    else if (!token && tbkToken) {
+      console.log('[COMMIT] Usuario canceló/anuló el pago en Webpay');
+      
+      // Intentar obtener eventId del pago abortado para redirigir al evento correcto
+      let eventIdForRedirect: number | null = null;
       if (tbkOrder) {
-        await prisma.payment.updateMany({
+        const abortedPayment = await prisma.payment.findFirst({
           where: { buyOrder: tbkOrder },
-          data: { status: 'ABORTED' },
+          include: { reservation: { select: { eventId: true } } },
         });
+        
+        if (abortedPayment) {
+          eventIdForRedirect = abortedPayment.reservation?.eventId || null;
+          
+          // Marca como ABORTED (SIN llamar a commit())
+          await prisma.payment.updateMany({
+            where: { buyOrder: tbkOrder },
+            data: { status: 'ABORTED' },
+          });
+        }
       }
 
       if (env.WEBPAY_FINAL_URL) {
-        const u = new URL(env.WEBPAY_FINAL_URL);
-        u.searchParams.set('status', 'aborted');
+        // Redirigir al evento específico si lo tenemos, o a la lista de eventos
+        const baseUrl = env.WEBPAY_FINAL_URL.replace(/\/payment-result\/?$/, '').replace(/\/eventos\/?$/, '');
+        const targetUrl = eventIdForRedirect ? `${baseUrl}/eventos/${eventIdForRedirect}` : `${baseUrl}/eventos`;
+        const u = new URL(targetUrl);
+        u.searchParams.set('paymentStatus', 'aborted');
         if (tbkOrder) u.searchParams.set('buyOrder', tbkOrder);
         return res.redirect(303, u.toString());
       }
       return res.status(200).json({ ok: false, aborted: true, buyOrder: tbkOrder || null });
     }
-
-    // Si no hay token ni TBK_TOKEN, es un error/timeout
-    if (!token) {
-      console.error('❌ [COMMIT] ERROR: token_ws faltante - posible timeout o error de Webpay');
+    
+    // ========================================
+    // CASO 3: Timeout (5 minutos sin hacer nada)
+    // Llega: TBK_ID_SESION + TBK_ORDEN_COMPRA (SIN token_ws ni TBK_TOKEN)
+    // ========================================
+    else if (!token && !tbkToken && (tbkIdSesion || tbkOrder)) {
+      console.log('[COMMIT] Timeout: usuario no completó el pago en 5 minutos');
+      
+      // Intentar obtener eventId del pago expirado
+      let eventIdForRedirect: number | null = null;
+      if (tbkOrder) {
+        const timeoutPayment = await prisma.payment.findFirst({
+          where: { buyOrder: tbkOrder },
+          include: { reservation: { select: { eventId: true } } },
+        });
+        
+        if (timeoutPayment) {
+          eventIdForRedirect = timeoutPayment.reservation?.eventId || null;
+          
+          // Marcar como ABORTED por timeout
+          await prisma.payment.updateMany({
+            where: { buyOrder: tbkOrder },
+            data: { status: 'ABORTED' },
+          });
+        }
+      }
       
       if (env.WEBPAY_FINAL_URL) {
-        const u = new URL(env.WEBPAY_FINAL_URL);
-        u.searchParams.set('status', 'timeout');
-        u.searchParams.set('error', 'El pago expiró o fue cancelado');
+        const baseUrl = env.WEBPAY_FINAL_URL.replace(/\/payment-result\/?$/, '').replace(/\/eventos\/?$/, '');
+        const targetUrl = eventIdForRedirect ? `${baseUrl}/eventos/${eventIdForRedirect}` : `${baseUrl}/eventos`;
+        const u = new URL(targetUrl);
+        u.searchParams.set('paymentStatus', 'timeout');
+        u.searchParams.set('error', 'El tiempo límite de 5 minutos para completar el pago se agotó');
+        if (tbkOrder) u.searchParams.set('buyOrder', tbkOrder);
         return res.redirect(303, u.toString());
       }
       
-      return res.status(400).json({ error: 'token_ws faltante - pago expirado o cancelado' });
+      return res.status(400).json({ error: 'Timeout: pago expirado después de 5 minutos' });
+    }
+    
+    // ========================================
+    // CASO 4: Sin parámetros reconocidos (error general)
+    // ========================================
+    else if (!token) {
+      console.error('[COMMIT] ERROR: token_ws faltante y sin parámetros TBK válidos');
+      
+      if (env.WEBPAY_FINAL_URL) {
+        const baseUrl = env.WEBPAY_FINAL_URL.replace(/\/payment-result\/?$/, '').replace(/\/eventos\/?$/, '');
+        const u = new URL(`${baseUrl}/eventos`);
+        u.searchParams.set('paymentStatus', 'error');
+        u.searchParams.set('error', 'Error al procesar el pago');
+        return res.redirect(303, u.toString());
+      }
+      
+      return res.status(400).json({ error: 'token_ws faltante - pago inválido' });
     }
 
-    console.log('🔵 [COMMIT] Token recibido:', token);
+    console.log('[COMMIT] Token recibido:', token);
 
+    // ========================================
+    // FLUJO NORMAL: Procesar token_ws (pago completado, rechazado o cancelado con botón)
+    // ========================================
+    
     // Ejecuta commit en Webpay usando el servicio
-    console.log('🔵 [COMMIT] Llamando a Transbank commit...');
+    console.log('[COMMIT] Llamando a Transbank commit...');
     const commit = await commitWebpayPayment(token);
-    console.log('🔵 [COMMIT] Respuesta de Transbank:', JSON.stringify(commit, null, 2));
+    console.log('[COMMIT] Respuesta de Transbank:', JSON.stringify(commit, null, 2));
 
     const payment = await prisma.payment.findUnique({
       where: { token },
       include: {
         reservation: {
           include: {
-            event: { select: { organizerId: true, eventType: true } },
+            event: { select: { id: true, organizerId: true, eventType: true } },
             buyer: { select: { id: true } },
           }
         },
       },
     });
     
-    console.log('🔵 [COMMIT] Payment encontrado:', payment ? `ID: ${payment.id}, Status: ${payment.status}` : 'NO ENCONTRADO');
+    console.log('[COMMIT] Payment encontrado:', payment ? `ID: ${payment.id}, Status: ${payment.status}` : 'NO ENCONTRADO');
     
     if (!payment) {
-      console.error('❌ [COMMIT] ERROR: Transacción no encontrada para token:', token);
+      console.error('[COMMIT] ERROR: Transacción no encontrada para token:', token);
       
       if (env.WEBPAY_FINAL_URL) {
-        const u = new URL(env.WEBPAY_FINAL_URL);
-        u.searchParams.set('status', 'error');
+        // Sin eventId, redirigir a home con mensaje de error
+        const baseUrl = env.WEBPAY_FINAL_URL.replace(/\/payment-result\/?$/, '').replace(/\/eventos\/?$/, '');
+        const u = new URL(`${baseUrl}/eventos`);
+        u.searchParams.set('paymentStatus', 'error');
         u.searchParams.set('error', 'Transacción no encontrada');
         return res.redirect(303, u.toString());
       }
@@ -385,8 +468,8 @@ export async function commitPayment(req: Request, res: Response) {
     // Verificar si es un evento de reventa (RESALE)
     const isResaleEvent = payment.reservation?.event?.eventType === 'RESALE';
 
-    console.log('🔵 [COMMIT] isApproved:', isApproved, 'isAborted:', isAborted, 'buyerIsOrganizer:', buyerIsOrganizer, 'isResaleEvent:', isResaleEvent);
-    console.log('🔵 [COMMIT] response_code:', commit.response_code);
+    console.log('[COMMIT] isApproved:', isApproved, 'isAborted:', isAborted, 'buyerIsOrganizer:', buyerIsOrganizer, 'isResaleEvent:', isResaleEvent);
+    console.log('[COMMIT] response_code:', commit.response_code);
 
     // Detectar cuenta conectada del organizador para enrutar payout (solo RESALE)
     let destAccountId: number | null = null;
@@ -439,7 +522,7 @@ export async function commitPayment(req: Request, res: Response) {
       // Si hay purchaseGroupId, actualizar TODAS las reservas del grupo
       if (payment.reservationId && payment.reservation?.purchaseGroupId) {
         const purchaseGroupId = payment.reservation.purchaseGroupId;
-        console.log('🔵 [COMMIT] Actualizando TODAS las reservas del grupo:', purchaseGroupId);
+        console.log('[COMMIT] Actualizando TODAS las reservas del grupo:', purchaseGroupId);
         
         await txp.reservation.updateMany({
           where: { purchaseGroupId },
@@ -479,7 +562,7 @@ export async function commitPayment(req: Request, res: Response) {
       }
     });
 
-    console.log('✅ [COMMIT] Transacción actualizada en BD');
+    console.log('[COMMIT] Transacción actualizada en BD');
     
     // LOG: Payment success
     if (isApproved && !buyerIsOrganizer && payment.reservationId) {
@@ -493,7 +576,7 @@ export async function commitPayment(req: Request, res: Response) {
     if (isApproved && !buyerIsOrganizer && payment.reservationId) {
       if (payment.reservation?.purchaseGroupId) {
         const purchaseGroupId = payment.reservation.purchaseGroupId;
-        console.log('🔵 [COMMIT] Procesando grupo de compra:', purchaseGroupId);
+        console.log('[COMMIT] Procesando grupo de compra:', purchaseGroupId);
         
         // Obtener todas las reservas del grupo
         const groupReservations = await prisma.reservation.findMany({
@@ -501,16 +584,16 @@ export async function commitPayment(req: Request, res: Response) {
           select: { id: true },
         });
         
-        console.log('🔵 [COMMIT] Reservas en el grupo:', groupReservations.length);
+        console.log('[COMMIT] Reservas en el grupo:', groupReservations.length);
         
         // Generar tickets para cada reserva del grupo
         for (const res of groupReservations) {
-          console.log('🔵 [COMMIT] Generando tickets para reserva:', res.id);
+          console.log('[COMMIT] Generando tickets para reserva:', res.id);
           queueTicketGeneration(res.id);
         }
       } else {
         // Reserva individual sin grupo
-        console.log('🔵 [COMMIT] Iniciando procesamiento asíncrono de reserva individual:', payment.reservationId);
+        console.log('[COMMIT] Iniciando procesamiento asíncrono de reserva individual:', payment.reservationId);
         queueTicketGeneration(payment.reservationId);
       }
     }
@@ -528,15 +611,15 @@ export async function commitPayment(req: Request, res: Response) {
         : 'Pago procesado.',
     };
 
-    console.log('🔵 [COMMIT] Payload creado:', payload);
-    console.log('🔵 [COMMIT] WEBPAY_FINAL_URL:', env.WEBPAY_FINAL_URL);
+    console.log('[COMMIT] Payload creado:', payload);
+    console.log('[COMMIT] WEBPAY_FINAL_URL:', env.WEBPAY_FINAL_URL);
 
     if (env.WEBPAY_FINAL_URL) {
       // Redirigir a la vista del evento con modal de éxito
       const eventId = payment.reservation?.eventId;
-      console.log('🔵 [COMMIT] EventID para redirección:', eventId);
+      console.log('[COMMIT] EventID para redirección:', eventId);
       if (eventId && payload.ok) {
-        console.log('🔵 [COMMIT] Construyendo URL de redirección exitosa...');
+        console.log('[COMMIT] Construyendo URL de redirección exitosa...');
         // Construir URL: /eventos/:id?showPurchaseSuccess=true&reservationId=X
         // Normalizar base URL (remover /eventos o /payment-result si existen)
         let baseUrl = env.WEBPAY_FINAL_URL.replace(/\/payment-result\/?$/, '').replace(/\/eventos\/?$/, '');
@@ -547,14 +630,18 @@ export async function commitPayment(req: Request, res: Response) {
         if (payment.reservation?.purchaseGroupId) {
           u.searchParams.set('purchaseGroupId', payment.reservation.purchaseGroupId);
         }
-        console.log('✅ [COMMIT] Redirigiendo a:', u.toString());
+        console.log('[COMMIT] Redirigiendo a:', u.toString());
         return res.redirect(303, u.toString());
       }
       
-      console.log('⚠️ [COMMIT] Usando fallback de redirección...');
-      // Fallback: ruta legacy payment-result (solo para errores)
+      console.log('[COMMIT] Usando fallback de redirección...');
+      // Fallback: redirigir al evento con estado de pago
+      // Reutilizar eventId ya declarado arriba
       let baseUrl = env.WEBPAY_FINAL_URL.replace(/\/payment-result\/?$/, '').replace(/\/eventos\/?$/, '');
-      const u = new URL(`${baseUrl}/payment-result`);
+      
+      // Si hay eventId, redirigir al evento; si no, a la lista de eventos
+      const targetUrl = eventId ? `${baseUrl}/eventos/${eventId}` : `${baseUrl}/eventos`;
+      const u = new URL(targetUrl);
       
       // Determinar el estado según el resultado
       let statusParam = 'failed'; // Por defecto: rechazado
@@ -567,8 +654,7 @@ export async function commitPayment(req: Request, res: Response) {
       }
       // Si no es ninguno de los anteriores, queda 'failed' (rechazado por el banco)
       
-      u.searchParams.set('status', statusParam);
-      u.searchParams.set('token', token);
+      u.searchParams.set('paymentStatus', statusParam);
       u.searchParams.set('buyOrder', payment.buyOrder || '');
       u.searchParams.set('amount', String(payment.amount));
       if (payment.reservationId) u.searchParams.set('reservationId', String(payment.reservationId));
@@ -577,17 +663,21 @@ export async function commitPayment(req: Request, res: Response) {
         const errorMsg = `Pago rechazado por el banco (código: ${commit.response_code || 'desconocido'})`;
         u.searchParams.set('error', errorMsg);
       }
-      console.log('⚠️ [COMMIT] Redirigiendo a fallback:', u.toString());
+      console.log('[COMMIT] Redirigiendo a fallback:', u.toString());
       return res.redirect(303, u.toString());
     }
 
-    console.log('⚠️ [COMMIT] No hay WEBPAY_FINAL_URL, devolviendo JSON');
+    console.log('[COMMIT] No hay WEBPAY_FINAL_URL, devolviendo JSON');
     return res.status(payload.ok ? 200 : (buyerIsOrganizer ? 403 : 200)).json(payload);
   } catch (err: any) {
     console.error('commitPayment error:', err);
     // Redirigir al frontend con error en lugar de devolver JSON
     const errorMsg = encodeURIComponent(err?.message || 'Error al confirmar el pago');
-    return res.redirect(303, `${env.WEBPAY_FINAL_URL}?status=error&error=${errorMsg}`);
+    if (env.WEBPAY_FINAL_URL) {
+      const baseUrl = env.WEBPAY_FINAL_URL.replace(/\/payment-result\/?$/, '').replace(/\/eventos\/?$/, '');
+      return res.redirect(303, `${baseUrl}/eventos?paymentStatus=error&error=${errorMsg}`);
+    }
+    return res.status(500).json({ error: 'Error al confirmar el pago' });
   }
 }
 
@@ -1051,7 +1141,7 @@ export async function listMyPayouts(req: Request, res: Response) {
     const userId = (req as any)?.user?.id as number | undefined;
     if (!userId) return res.status(401).json({ error: 'No autenticado' });
 
-    // ✅ verificación robusta compatible con tu schema
+    // verificación robusta compatible con tu schema
     const okOrganizer = await isOrganizerApprovedByDb(req);
     if (!okOrganizer) {
       return res.status(403).json({ error: 'FORBIDDEN', message: 'No aprobado como organizador' });
@@ -1589,7 +1679,7 @@ export async function payoutsWebhook(req: Request, res: Response) {
 }
 
 /* ============================================================
-   ✅ ÚNICA función adminApproveAndCapture (unificada)
+   ÚNICA función adminApproveAndCapture (unificada)
    - Si hay payment.pspPaymentId → captura/libera en PSP (split/escrow).
    - Si no, usa Webpay (TBK) capture().
    - Marca reserva como PAID y crea payout PENDING si corresponde.
