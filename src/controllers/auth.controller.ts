@@ -528,6 +528,45 @@ export async function changeEmail(req: Request, res: Response) {
   }
 }
 
+/* ===== Renovar token ===== */
+export async function refreshToken(req: Request, res: Response) {
+  try {
+    const authUser = (req as any).user as { id?: number; userId?: number; role?: string; tokenVersion?: number } | undefined;
+    const userId = authUser?.id ?? authUser?.userId;
+    if (!userId) return res.status(401).json({ error: 'No autenticado' });
+
+    // Obtener datos actualizados del usuario para validar que sigue activo
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        role: true,
+        tokenVersion: true,
+        isActive: true,
+      },
+    });
+
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (!user.isActive) return res.status(403).json({ error: 'Cuenta desactivada' });
+
+    // Verificar que el tokenVersion coincida (si se hizo logout-all, el token actual es inválido)
+    if (authUser?.tokenVersion !== undefined && user.tokenVersion !== authUser.tokenVersion) {
+      return res.status(401).json({ error: 'Token invalidado. Inicia sesión nuevamente.' });
+    }
+
+    // Generar nuevo token con datos actualizados
+    const newToken = generateToken({
+      userId: user.id,
+      role: coerceRole(user.role),
+      tokenVersion: user.tokenVersion,
+    });
+
+    return res.json({ token: newToken });
+  } catch (e) {
+    console.error('refreshToken error:', e);
+    return res.status(500).json({ error: 'No se pudo renovar el token' });
+  }
+}
 
 
 

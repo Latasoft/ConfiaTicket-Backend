@@ -8,7 +8,8 @@ import {
   changePassword,
   deleteAccount,
   logoutAll,
-  changeEmail, // 👈 NUEVO
+  changeEmail,
+  refreshToken,
 } from '../controllers/auth.controller';
 import { authLimiter, strictAuthLimiter } from '../middleware/rateLimit'; // Rate limiters diferenciados
 
@@ -21,6 +22,13 @@ const router = Router();
  */
 router.post('/register', authLimiter, register);
 router.post('/login', strictAuthLimiter, login); // ⭐ Limiter más estricto para login
+
+/**
+ * Renovar token (requiere token válido aunque esté cerca de expirar)
+ * - Usa authenticateToken para validar token actual
+ * - Retorna nuevo token con tiempo extendido
+ */
+router.post('/refresh', authenticateToken, refreshToken);
 
 /**
  * Perfil actual del usuario autenticado
