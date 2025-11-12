@@ -336,25 +336,33 @@ export async function commitPayment(req: Request, res: Response) {
           eventIdForRedirect = abortedPayment.reservation?.eventId || null;
           
           // FIX: Liberar tickets y cancelar reserva cuando se aborta el pago
-          await prisma.$transaction([
-            // 1. Marcar payment como ABORTED
-            prisma.payment.updateMany({
+          if (abortedPayment.reservationId) {
+            await prisma.$transaction([
+              // 1. Marcar payment como ABORTED
+              prisma.payment.updateMany({
+                where: { buyOrder: tbkOrder },
+                data: { status: 'ABORTED' },
+              }),
+              // 2. Liberar tickets RESALE asociados a la reserva
+              prisma.ticket.updateMany({
+                where: { reservationId: abortedPayment.reservationId },
+                data: { reservationId: null }
+              }),
+              // 3. Cancelar la reserva para liberar el stock
+              prisma.reservation.update({
+                where: { id: abortedPayment.reservationId },
+                data: { status: 'CANCELED' }
+              })
+            ]);
+            
+            console.log(`[COMMIT] Reserva #${abortedPayment.reservationId} cancelada y tickets liberados`);
+          } else {
+            // Solo marcar payment como ABORTED si no hay reserva asociada
+            await prisma.payment.updateMany({
               where: { buyOrder: tbkOrder },
               data: { status: 'ABORTED' },
-            }),
-            // 2. Liberar tickets RESALE asociados a la reserva
-            prisma.ticket.updateMany({
-              where: { reservationId: abortedPayment.reservationId },
-              data: { reservationId: null }
-            }),
-            // 3. Cancelar la reserva para liberar el stock
-            prisma.reservation.update({
-              where: { id: abortedPayment.reservationId },
-              data: { status: 'CANCELED' }
-            })
-          ]);
-          
-          console.log(`[COMMIT] Reserva #${abortedPayment.reservationId} cancelada y tickets liberados`);
+            });
+          }
         }
       }
 
@@ -389,25 +397,33 @@ export async function commitPayment(req: Request, res: Response) {
           eventIdForRedirect = timeoutPayment.reservation?.eventId || null;
           
           // FIX: Liberar tickets y cancelar reserva cuando expira por timeout
-          await prisma.$transaction([
-            // 1. Marcar payment como ABORTED por timeout
-            prisma.payment.updateMany({
+          if (timeoutPayment.reservationId) {
+            await prisma.$transaction([
+              // 1. Marcar payment como ABORTED por timeout
+              prisma.payment.updateMany({
+                where: { buyOrder: tbkOrder },
+                data: { status: 'ABORTED' },
+              }),
+              // 2. Liberar tickets RESALE asociados a la reserva
+              prisma.ticket.updateMany({
+                where: { reservationId: timeoutPayment.reservationId },
+                data: { reservationId: null }
+              }),
+              // 3. Cancelar la reserva para liberar el stock
+              prisma.reservation.update({
+                where: { id: timeoutPayment.reservationId },
+                data: { status: 'CANCELED' }
+              })
+            ]);
+            
+            console.log(`[COMMIT] Reserva #${timeoutPayment.reservationId} cancelada por timeout y tickets liberados`);
+          } else {
+            // Solo marcar payment como ABORTED si no hay reserva asociada
+            await prisma.payment.updateMany({
               where: { buyOrder: tbkOrder },
               data: { status: 'ABORTED' },
-            }),
-            // 2. Liberar tickets RESALE asociados a la reserva
-            prisma.ticket.updateMany({
-              where: { reservationId: timeoutPayment.reservationId },
-              data: { reservationId: null }
-            }),
-            // 3. Cancelar la reserva para liberar el stock
-            prisma.reservation.update({
-              where: { id: timeoutPayment.reservationId },
-              data: { status: 'CANCELED' }
-            })
-          ]);
-          
-          console.log(`[COMMIT] Reserva #${timeoutPayment.reservationId} cancelada por timeout y tickets liberados`);
+            });
+          }
         }
       }
       
