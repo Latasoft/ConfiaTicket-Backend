@@ -63,11 +63,6 @@ if (env.IS_PROD) {
   });
 }
 
-// ✅ Manejo de conexiones perdidas y reconexión automática
-prisma.$on('beforeExit' as never, async () => {
-  console.log('Prisma: Desconectando antes de salir...');
-});
-
 // ✅ Limpieza periódica de conexiones idle (solo en producción)
 if (env.IS_PROD) {
   setInterval(async () => {
