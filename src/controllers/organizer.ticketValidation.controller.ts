@@ -38,6 +38,7 @@ export async function validateTicket(req: Request, res: Response) {
               date: true,
               location: true,
               organizerId: true,
+              eventType: true,
             },
           },
           buyer: {
@@ -56,6 +57,16 @@ export async function validateTicket(req: Request, res: Response) {
     return res.status(404).json({ 
       error: 'Ticket no encontrado',
       valid: false,
+    });
+  }
+
+  // Verificar que el evento NO es de tipo RESALE
+  if (ticket.reservation.event.eventType === 'RESALE') {
+    return res.status(400).json({ 
+      error: 'Los tickets de reventa no se validan desde aquí',
+      valid: false,
+      reason: 'resale_ticket',
+      message: 'Los tickets de reventa se validan automáticamente cuando el comprador escanea el QR proxy. Puedes ver las estadísticas en la sección de estadísticas del evento.',
     });
   }
 
