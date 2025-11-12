@@ -45,6 +45,8 @@ import resaleTicketValidationRoutes from './routes/resaleTicketValidation.routes
 import claimsRoutes from './routes/claims.routes';
 import documentsRoutes from './routes/documents.routes';
 import testRoutes from './routes/test.routes';
+import adminTicketValidationsRoutes from './routes/admin.ticketValidations.routes';
+import organizerTicketValidationsRoutes from './routes/organizer.ticketValidations.routes';
 
 import { startPayoutsReconcileJob } from './jobs/payouts.reconcile.job';
 import { startPayoutsRetryJob } from './jobs/payouts.retry.job';
@@ -227,12 +229,14 @@ app.use('/api/config', configRoutes);
 
 app.use('/api/organizer/events', organizerEventsRouter);
 app.use('/api/organizer/ticket-validation', organizerTicketValidationRoutes);
+app.use('/api/organizer/ticket-validations', organizerTicketValidationsRoutes);
 app.use('/api/resale-tickets', resaleTicketValidationRoutes);
 app.use('/api/admin/events', adminEventsRouter);
 app.use('/api/admin/users', adminUsersRouter);
 app.use('/api/admin/organizer-applications', adminOrganizerAppsRouter);
 app.use('/api/admin/documents', adminDocumentsRouter);
 app.use('/api/admin/config', adminConfigRoutes);
+app.use('/api/admin/ticket-validations', adminTicketValidationsRoutes);
 
 app.use('/api/payments', paymentsRoutes);
 app.use('/api/claims', claimsRoutes);
