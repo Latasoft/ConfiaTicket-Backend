@@ -9,6 +9,7 @@ import rateLimit from 'express-rate-limit';
 import morgan from 'morgan';
 import { env } from './config/env';
 import prisma from './prisma/client';
+import { dbHealthMiddleware, healthCheckEndpoint } from './middleware/dbHealthMiddleware';
 
 // Routers existentes
 import authRoutes from './routes/auth.routes';
@@ -213,8 +214,11 @@ app.use(
 /* ======================== Rutas base ======================== */
 
 app.get('/', (_req, res) => res.send('API Portal Entradas funcionando 🚀'));
-app.get('/health', (_req, res) => res.status(200).send('ok')); // para Render
-app.get('/healthz', (_req, res) => res.status(200).json({ ok: true })); // compat
+app.get('/health', healthCheckEndpoint); // Health check con verificación de DB
+app.get('/healthz', healthCheckEndpoint); // Alias compatible
+
+// ✅ Middleware de salud de DB (se ejecuta periódicamente)
+app.use(dbHealthMiddleware);
 
 /* ========================= Rutas API ======================== */
 
@@ -306,20 +310,57 @@ if ((process.env.NODE_ENV ?? 'development') !== 'test') {
 
 // Graceful shutdown para Render/containers
 async function shutdown(signal: string) {
-  console.log(`\nRecibido ${signal}, cerrando servidor...`);
+  console.log(`\n⚠️  Recibido ${signal}, iniciando cierre graceful...`);
+  
+  let exitCode = 0;
+  
   try {
+    // 1. Dejar de aceptar nuevas conexiones HTTP
     if (server) {
-      await new Promise<void>((resolve) => server!.close(() => resolve()));
+      console.log('🔒 Cerrando servidor HTTP...');
+      await new Promise<void>((resolve, reject) => {
+        server!.close((err) => {
+          if (err) reject(err);
+          else {
+            console.log('✅ Servidor HTTP cerrado');
+            resolve();
+          }
+        });
+      });
     }
+
+    // 2. Esperar queries en progreso (máximo 10 segundos)
+    console.log('⏳ Esperando queries activas...');
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // 3. Desconectar Prisma
+    console.log('🗄️  Desconectando base de datos...');
     await prisma.$disconnect();
+    console.log('✅ Base de datos desconectada');
+
   } catch (e) {
-    console.error('Error al cerrar:', e);
+    console.error('❌ Error durante shutdown:', e);
+    exitCode = 1;
   } finally {
-    process.exit(0);
+    console.log(`👋 Proceso terminado (código ${exitCode})`);
+    process.exit(exitCode);
   }
 }
+
+// Manejo de señales
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Manejo de errores no capturados
+process.on('uncaughtException', (error) => {
+  console.error('💥 Uncaught Exception:', error);
+  shutdown('uncaughtException');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+  shutdown('unhandledRejection');
+});
 
 export default app;
 
