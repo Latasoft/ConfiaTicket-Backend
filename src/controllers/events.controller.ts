@@ -507,25 +507,25 @@ export async function getEventDetails(req: Request, res: Response) {
       }
     }
 
-    // Ventas pagadas vs reservas activas (pendientes dentro del HOLD)
-    const [paidAgg, pendingAgg] = await Promise.all([
-      prisma.reservation.aggregate({
-        _sum: { quantity: true },
-        where: { eventId, status: 'PAID' as any },
-      }),
-      prisma.reservation.aggregate({
-        _sum: { quantity: true },
-        where: {
-          eventId,
-          status: 'PENDING_PAYMENT' as any,
-          expiresAt: { gt: now },
-          createdAt: { gt: new Date(now.getTime() - HOLD_MS) }, // solo ventana de hold
-        },
-      }),
-    ]);
+    // Optimización: Usar una sola consulta agregada en lugar de dos
+    const reservationStats = await prisma.reservation.groupBy({
+      by: ['status'],
+      where: {
+        eventId,
+        OR: [
+          { status: 'PAID' as any },
+          {
+            status: 'PENDING_PAYMENT' as any,
+            expiresAt: { gt: now },
+            createdAt: { gt: new Date(now.getTime() - HOLD_MS) },
+          },
+        ],
+      },
+      _sum: { quantity: true },
+    });
 
-    const paid = paidAgg._sum.quantity ?? 0;
-    const pendingActive = pendingAgg._sum.quantity ?? 0;
+    const paid = reservationStats.find(r => r.status === 'PAID')?._sum.quantity ?? 0;
+    const pendingActive = reservationStats.find(r => r.status === 'PENDING_PAYMENT')?._sum.quantity ?? 0;
 
     const remainingPaidOnly = Math.max(0, totalCapacity - paid);
     const remaining = Math.max(0, totalCapacity - (paid + pendingActive));

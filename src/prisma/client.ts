@@ -13,13 +13,21 @@ const log: Prisma.LogLevel[] = env.IS_PROD
   ? ['error', 'warn']
   : ['query', 'info', 'warn', 'error'];
 
-// ✅ Configuración del pool de conexiones para producción
-const CONNECTION_LIMIT = env.IS_PROD ? 10 : 5; // Ajusta según tu plan de base de datos
-const CONNECTION_TIMEOUT = 20000; // 20 segundos
-const POOL_TIMEOUT = 10000; // 10 segundos
-const IDLE_TIMEOUT = 600000; // 10 minutos
+// ✅ Configuración del pool de conexiones para Supabase + PgBouncer
+// IMPORTANTE: Con PgBouncer, estas son conexiones POR INSTANCIA de Node.js
+// PgBouncer maneja el pooling global (soporta 1000+ conexiones totales)
+//
+// Free tier: 10-15 conexiones por instancia
+// Pro tier: 20-50 conexiones por instancia
+// 
+// El límite real lo define DATABASE_URL, estos son valores por defecto si no se especifica
+const CONNECTION_LIMIT = env.IS_PROD ? 30 : 5; // 30 para producción con PgBouncer
+const CONNECTION_TIMEOUT = 30000; // 30 segundos
+const POOL_TIMEOUT = 30000; // 30 segundos
+const IDLE_TIMEOUT = 300000; // 5 minutos (libera conexiones inactivas rápido)
+const QUERY_TIMEOUT = 15000; // 15 segundos máximo por query
 
-// Construir DATABASE_URL con parámetros de pool
+// Construir DATABASE_URL con parámetros de pool optimizados
 function getDatabaseUrl(): string {
   const baseUrl = env.DATABASE_URL || '';
   
@@ -32,9 +40,9 @@ function getDatabaseUrl(): string {
     return baseUrl;
   }
 
-  // Agregar parámetros de pool si no existen
+  // Agregar parámetros de pool optimizados para alta concurrencia
   const separator = baseUrl.includes('?') ? '&' : '?';
-  return `${baseUrl}${separator}connection_limit=${CONNECTION_LIMIT}&pool_timeout=${POOL_TIMEOUT}&connect_timeout=${CONNECTION_TIMEOUT}`;
+  return `${baseUrl}${separator}connection_limit=${CONNECTION_LIMIT}&pool_timeout=${POOL_TIMEOUT}&connect_timeout=${CONNECTION_TIMEOUT}&statement_timeout=${QUERY_TIMEOUT}`;
 }
 
 const prisma =
