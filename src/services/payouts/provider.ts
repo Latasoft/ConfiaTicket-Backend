@@ -87,7 +87,7 @@ export function getPayoutProvider(): PayoutProvider {
   if (_singleton) return _singleton;
 
   // driver: 'sim' (default) | 'http'
-  const driver = String(env.PAYOUTS_DRIVER ?? process.env.PAYOUTS_DRIVER ?? "sim").toLowerCase();
+  const driver = String(env.PAYOUTS_DRIVER ?? process.env.PAYOUTS_DRIVER ?? "manual").toLowerCase();
 
   if (driver === "http") {
     const baseUrl = String(env.PAYOUTS_HTTP_BASEURL ?? process.env.PAYOUTS_HTTP_BASEURL ?? "");
@@ -97,9 +97,23 @@ export function getPayoutProvider(): PayoutProvider {
     return _singleton;
   }
 
-  // Por defecto: simulador
-  const base: unknown = new SimulatedPayoutProvider();
-  _singleton = wrapProvider(base);
+  if (driver === "sim") {
+    // Solo para desarrollo/testing
+    const base: unknown = new SimulatedPayoutProvider();
+    _singleton = wrapProvider(base);
+    return _singleton;
+  }
+
+  // Por defecto: modo manual (no hace nada automáticamente)
+  // Los pagos deben marcarse manualmente con adminMarkPayoutPaid
+  _singleton = {
+    async pay(): Promise<PayoutPayResult> {
+      return {
+        ok: false,
+        error: "Payouts en modo manual. Use adminMarkPayoutPaid para marcar como pagado después de transferir.",
+      };
+    },
+  };
   return _singleton;
 }
 

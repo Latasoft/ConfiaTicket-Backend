@@ -1409,10 +1409,18 @@ export async function adminListPayouts(req: Request, res: Response) {
           pspPayoutId: true,
           createdAt: true,
           updatedAt: true,
+          failureCode: true,
+          failureMessage: true,
           // contexto
           account: {
             select: {
               userId: true,
+              payoutBankName: true,
+              payoutAccountType: true,
+              payoutAccountNumber: true,
+              payoutHolderName: true,
+              payoutHolderRut: true,
+              payoutsEnabled: true,
               user: { select: { id: true, name: true, email: true } },
             },
           },
@@ -1449,6 +1457,8 @@ export async function adminListPayouts(req: Request, res: Response) {
       pspPayoutId: p.pspPayoutId,
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
+      failureCode: p.failureCode,
+      failureMessage: p.failureMessage,
       // extras
       buyOrder: p.payment?.buyOrder ?? null,
       netAmount: p.payment?.netAmount ?? null,
@@ -1469,6 +1479,15 @@ export async function adminListPayouts(req: Request, res: Response) {
             email: (p as any).account.user.email,
           }
         : null,
+      // Datos bancarios del organizador
+      bankAccount: (p as any).account ? {
+        bankName: (p as any).account.payoutBankName,
+        accountType: (p as any).account.payoutAccountType,
+        accountNumber: (p as any).account.payoutAccountNumber,
+        holderName: (p as any).account.payoutHolderName,
+        holderRut: (p as any).account.payoutHolderRut,
+        payoutsEnabled: (p as any).account.payoutsEnabled,
+      } : null,
     }));
 
     return res.status(200).json({ items, total, page, pageSize });
