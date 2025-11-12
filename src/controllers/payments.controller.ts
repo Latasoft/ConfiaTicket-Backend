@@ -471,9 +471,9 @@ export async function commitPayment(req: Request, res: Response) {
     console.log('[COMMIT] isApproved:', isApproved, 'isAborted:', isAborted, 'buyerIsOrganizer:', buyerIsOrganizer, 'isResaleEvent:', isResaleEvent);
     console.log('[COMMIT] response_code:', commit.response_code);
 
-    // Detectar cuenta conectada del organizador para enrutar payout (solo RESALE)
+    // Detectar cuenta conectada del organizador para enrutar payout (OWN y RESALE)
     let destAccountId: number | null = null;
-    if (isApproved && isResaleEvent && !buyerIsOrganizer && payment.reservation?.event?.organizerId) {
+    if (isApproved && !buyerIsOrganizer && payment.reservation?.event?.organizerId) {
       const acct = await prisma.connectedAccount.findUnique({
         where: { userId: payment.reservation.event.organizerId },
       });
@@ -481,11 +481,13 @@ export async function commitPayment(req: Request, res: Response) {
     }
     const finalDestAccountId = payment.destinationAccountId ?? destAccountId ?? null;
 
-    // Calcular comisión de plataforma para el payout
+    // Calcular comisión de plataforma (inversamente desde el total)
+    // payment.amount = subtotal + fee, donde fee = subtotal * bps/10000
+    // por lo tanto: subtotal = payment.amount / (1 + bps/10000)
     const platformFeeBps = await getPlatformFeeBps();
-    const subtotal = payment.amount;
-    const applicationFeeAmount = Math.round(subtotal * platformFeeBps / 10000);
-    const netAmount = Math.max(0, subtotal - applicationFeeAmount);
+    const divisor = 1 + (platformFeeBps / 10000);
+    const netAmount = Math.floor(payment.amount / divisor);  // Lo que recibe el organizador
+    const applicationFeeAmount = payment.amount - netAmount;  // Lo que recibe el admin
 
     await prisma.$transaction(async (txp) => {
       // Actualizar Payment con información de Transbank
@@ -550,8 +552,8 @@ export async function commitPayment(req: Request, res: Response) {
         });
       }
 
-      // Crear Payout PENDING si hay cuenta conectada (solo RESALE)
-      if (isApproved && isResaleEvent && !buyerIsOrganizer && finalDestAccountId && payment.reservationId) {
+      // Crear Payout PENDING si hay cuenta conectada (OWN y RESALE)
+      if (isApproved && !buyerIsOrganizer && finalDestAccountId && payment.reservationId) {
         await createPayout({
           accountId: finalDestAccountId,
           reservationId: payment.reservationId,
@@ -747,9 +749,11 @@ export async function capturePayment(req: Request, res: Response) {
       if (acct && acct.payoutsEnabled) destAccountId = acct.id;
     }
 
-    // Suponemos comisión de aplicación 0 por ahora (ajústalo cuando definas tu modelo de fees)
-    const applicationFeeAmount = payment.applicationFeeAmount ?? 0;
-    const computedNet = Math.max(0, captureAmount - applicationFeeAmount);
+    // Calcular monto neto inversamente desde el total capturado
+    const platformFeeBps = await getPlatformFeeBps();
+    const divisor = 1 + (platformFeeBps / 10000);
+    const computedNet = Math.floor(captureAmount / divisor);  // Lo que recibe el organizador
+    const applicationFeeAmount = payment.applicationFeeAmount ?? (captureAmount - computedNet);
 
     // Actualiza BD: Payment CAPTURED, Reservation PAID, crea Payout PENDING
     const updated = await prisma.$transaction(async (txp) => {
@@ -1754,9 +1758,11 @@ export async function adminApproveAndCapture(req: Request, res: Response) {
       if (acct && acct.payoutsEnabled) destAccountId = acct.id;
     }
 
-    // 3) Calcular neto (ajusta si tienes comisión)
-    const applicationFeeAmount = payment.applicationFeeAmount ?? 0;
-    const computedNet = Math.max(0, captureAmount - applicationFeeAmount);
+    // 3) Calcular neto inversamente desde el total capturado
+    const platformFeeBps = await getPlatformFeeBps();
+    const divisor = 1 + (platformFeeBps / 10000);
+    const computedNet = Math.floor(captureAmount / divisor);  // Lo que recibe el organizador
+    const applicationFeeAmount = payment.applicationFeeAmount ?? (captureAmount - computedNet);
 
     // 4) Actualizaciones atómicas: payment CAPTURED + reserva PAID + crear payout PENDING (si hay cuenta)
     const updated = await prisma.$transaction(async (txp) => {

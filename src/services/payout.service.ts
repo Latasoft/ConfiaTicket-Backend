@@ -101,30 +101,31 @@ export async function getOrganizerConnectedAccount(userId: number) {
 }
 
 /**
- * Calcula el monto neto que recibirá el organizador después de descontar la comisión de plataforma
+ * Calcula el monto neto que recibirá el organizador
  * 
  * Lógica de negocio:
- * - Organizador define precio base (lo que quiere ganar)
+ * - Organizador define precio base (lo que quiere recibir)
  * - Comprador paga: precio base + comisión de plataforma
- * - Organizador recibe: precio base (payment.amount - fee)
+ * - Organizador recibe: precio base (el monto que definió en el evento)
+ * - Admin recibe: la comisión de plataforma
  * 
- * Prioriza Payment.netAmount si ya está calculado; si no, usa amount - applicationFeeAmount.
+ * Prioriza Payment.netAmount si ya está calculado; si no, calcula desde applicationFeeAmount.
  */
 export function calculateOrganizerNetAmount(payment: {
   amount: number;
   netAmount: number | null | undefined;
   applicationFeeAmount: number | null | undefined;
 }): number {
-  // Si ya tenemos netAmount precalculado, usarlo
+  // Si ya tenemos netAmount precalculado (desde commit/capture), usarlo
   if (typeof payment.netAmount === 'number' && payment.netAmount > 0) {
     return payment.netAmount;
   }
   
-  // Calcular: monto total - comisión de plataforma
+  // Calcular: monto total que pagó el comprador - comisión para el admin
   const fee = typeof payment.applicationFeeAmount === 'number' ? payment.applicationFeeAmount : 0;
   const net = payment.amount - fee;
   
-  // Nunca devolver negativo, fallback al monto total si algo sale mal
+  // Nunca devolver negativo
   return net > 0 ? net : payment.amount;
 }
 
