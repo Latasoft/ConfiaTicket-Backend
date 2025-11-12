@@ -329,17 +329,32 @@ export async function commitPayment(req: Request, res: Response) {
       if (tbkOrder) {
         const abortedPayment = await prisma.payment.findFirst({
           where: { buyOrder: tbkOrder },
-          include: { reservation: { select: { eventId: true } } },
+          include: { reservation: { select: { eventId: true, id: true } } },
         });
         
         if (abortedPayment) {
           eventIdForRedirect = abortedPayment.reservation?.eventId || null;
           
-          // Marca como ABORTED (SIN llamar a commit())
-          await prisma.payment.updateMany({
-            where: { buyOrder: tbkOrder },
-            data: { status: 'ABORTED' },
-          });
+          // FIX: Liberar tickets y cancelar reserva cuando se aborta el pago
+          await prisma.$transaction([
+            // 1. Marcar payment como ABORTED
+            prisma.payment.updateMany({
+              where: { buyOrder: tbkOrder },
+              data: { status: 'ABORTED' },
+            }),
+            // 2. Liberar tickets RESALE asociados a la reserva
+            prisma.ticket.updateMany({
+              where: { reservationId: abortedPayment.reservationId },
+              data: { reservationId: null }
+            }),
+            // 3. Cancelar la reserva para liberar el stock
+            prisma.reservation.update({
+              where: { id: abortedPayment.reservationId },
+              data: { status: 'CANCELED' }
+            })
+          ]);
+          
+          console.log(`[COMMIT] Reserva #${abortedPayment.reservationId} cancelada y tickets liberados`);
         }
       }
 
@@ -367,17 +382,32 @@ export async function commitPayment(req: Request, res: Response) {
       if (tbkOrder) {
         const timeoutPayment = await prisma.payment.findFirst({
           where: { buyOrder: tbkOrder },
-          include: { reservation: { select: { eventId: true } } },
+          include: { reservation: { select: { eventId: true, id: true } } },
         });
         
         if (timeoutPayment) {
           eventIdForRedirect = timeoutPayment.reservation?.eventId || null;
           
-          // Marcar como ABORTED por timeout
-          await prisma.payment.updateMany({
-            where: { buyOrder: tbkOrder },
-            data: { status: 'ABORTED' },
-          });
+          // FIX: Liberar tickets y cancelar reserva cuando expira por timeout
+          await prisma.$transaction([
+            // 1. Marcar payment como ABORTED por timeout
+            prisma.payment.updateMany({
+              where: { buyOrder: tbkOrder },
+              data: { status: 'ABORTED' },
+            }),
+            // 2. Liberar tickets RESALE asociados a la reserva
+            prisma.ticket.updateMany({
+              where: { reservationId: timeoutPayment.reservationId },
+              data: { reservationId: null }
+            }),
+            // 3. Cancelar la reserva para liberar el stock
+            prisma.reservation.update({
+              where: { id: timeoutPayment.reservationId },
+              data: { status: 'CANCELED' }
+            })
+          ]);
+          
+          console.log(`[COMMIT] Reserva #${timeoutPayment.reservationId} cancelada por timeout y tickets liberados`);
         }
       }
       
