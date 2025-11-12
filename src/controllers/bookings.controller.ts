@@ -502,6 +502,13 @@ export async function createBooking(req: Authed, res: Response) {
         e.remaining = remaining;
         throw e;
       }
+      
+      // Calcular monto con comisión de plataforma
+      const subtotal = (ev.price ?? 0) * quantity;
+      const platformFeeBps = await getPlatformFeeBps();
+      const platformFee = Math.round(subtotal * platformFeeBps / 10000);
+      const totalAmount = subtotal + platformFee;
+      
       const r = await tx.reservation.create({
         data: {
           eventId,
@@ -509,7 +516,7 @@ export async function createBooking(req: Authed, res: Response) {
           quantity,
           status: "PAID" as any,
           paidAt: new Date(),
-          amount: (ev.price ?? 0) * quantity,
+          amount: totalAmount,
         },
         select: { id: true },
       });
